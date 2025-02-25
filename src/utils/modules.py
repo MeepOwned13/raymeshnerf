@@ -7,7 +7,7 @@ class PositionalEncoding(nn.Module):
 
     def __init__(self, max_freq: int):
         """Init
-        
+
         Args:
             max_freq: Maximum frequency to use for encoding
         """
@@ -18,7 +18,7 @@ class PositionalEncoding(nn.Module):
         freq_bands = 2.0 ** torch.linspace(0.0, max_freq - 1, steps=max_freq, dtype=torch.float32)
         self._freq_bands = nn.parameter.Buffer(freq_bands)
         """Pre-calculated frequency bands for encoding"""
-    
+
     def forward(self, x: Tensor) -> Tensor:
         """Perform Positional Encoding
 
@@ -31,13 +31,13 @@ class PositionalEncoding(nn.Module):
         encs = (x[..., None] * self._freq_bands).flatten(-2, -1)
         # Encoding to (x, sin parts, cos parts) of shape(N, M+M*max_freq*2) if x is of shape(N,M)
         return torch.cat([x, encs.sin(), encs.cos()], dim=-1)
-    
+
     def get_out_dim(self, in_dim: int):
         """Returns the outgoing dimension of the forward() method
 
         Args:
             in_dim: Last dim of Tensor to be used
-        
+
         Returns:
             out_dim: Last dim after Positional Encoding
         """
@@ -83,7 +83,7 @@ class NeRF(nn.Module):
         for i in range(num_layers - 1):
             self.feature_mlp.append(nn.Sequential(
                 # skip with +1 as we already have the initial layer
-                nn.Linear(hidden_size + (coord_dim if i+1 in self.skips else 0), hidden_size),
+                nn.Linear(hidden_size + (coord_dim if i + 1 in self.skips else 0), hidden_size),
                 nn.ReLU(inplace=True),
             ))
 
@@ -137,4 +137,4 @@ class NeRF(nn.Module):
         rgb = self.rgb_mlp(features)
 
         return torch.cat([rgb, sigma], dim=-1)
-    
+
