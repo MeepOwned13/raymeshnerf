@@ -1,5 +1,6 @@
-__all__ = ['modules', 'rays']
+__all__ = ['nn', 'rays', 'data']
 
-from . import modules
+from . import nn
 from . import rays
+from . import data
 

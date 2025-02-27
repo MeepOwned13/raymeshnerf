@@ -1,7 +1,6 @@
 import torch
 from torch import Tensor, nn
-import torch.functional as F
-from torch.utils.data import WeightedRandomSampler
+import torch.nn.functional as F
 from matplotlib import pyplot as plt
 
 
@@ -18,6 +17,8 @@ def create_rays(height: int, width: int, intrinsic: Tensor, c2w: Tensor) -> tupl
         ray_origins (shape[width, height, 3]): Ray origins in World coordinates
         ray_directions (shape[width, height, 3]): Cartesian ray directions in World
     """
+    device = c2w.device
+
     focal_x = intrinsic[0, 0]
     focal_y = intrinsic[1, 1]
     # cx and cy handle the misalignement of the principal point with the center of the image
@@ -25,12 +26,15 @@ def create_rays(height: int, width: int, intrinsic: Tensor, c2w: Tensor) -> tupl
     cy = intrinsic[1, 2]
 
     # Index each point on the image, determine ray directions to them
-    i, j = torch.meshgrid(torch.arange(width, dtype=torch.float32),
-                          torch.arange(height, dtype=torch.float32), indexing='xy')
+    i, j = torch.meshgrid(
+        torch.arange(width, dtype=torch.float32, device=device),
+        torch.arange(height, dtype=torch.float32, device=device),
+        indexing='xy'
+    )
     directions = torch.stack((
         (i - cx) / focal_x,
         -(j - cy) / focal_y,
-        -torch.ones(i.shape, dtype=torch.float32)  # -1 since ray is cast away from camera
+        -torch.ones(i.shape, dtype=torch.float32, device=device)  # -1 since ray is cast away from camera
     ), -1)
 
     # Transform ray directions to World, origins just need to be broadcasted accordingly
@@ -110,54 +114,6 @@ def sobel_filter(images: Tensor) -> Tensor:
     edges = filter(images.mean(dim=-1).unsqueeze(1))
     edges = torch.sqrt(torch.sum(edges ** 2, dim=1))
     return edges
-
-
-class ImportantPixelSampler(WeightedRandomSampler):
-    """Sampler implementing Importan Pixels Sampling for NeRF"""
-
-    def __init__(self, weights: Tensor, num_samples: int, replacement: bool = True, swap_strategy_iter: int = 100):
-        """Init
-
-        Args:
-            weights (shape[N]): Pixel weights assigned by edge detection
-            num_samples: Number of samples to draw per __iter__ (epoch)
-            replacement: Choose /w replacement?
-            swap_strategy_iter: Specifies at which iteration Squared Error sampling takes over fully
-        """
-        super(ImportantPixelSampler, self).__init__(weights=weights,
-                                                    num_samples=num_samples, replacement=replacement, generator=None)
-        weights = weights.to(torch.float32)
-        self.pixel_weights: Tensor = weights / weights.max()
-        """(shape[N]) Pixel weights assigned by edge detection"""
-
-        self.weights: Tensor = self.pixel_weights
-        """(shape[N]) Weights used for choosing the next samples"""
-
-        self.swap_strategy_iter: int = swap_strategy_iter
-        """Specifies at which iteration Squared Error sampling takes over fully"""
-
-        self.num_iters: int = 0
-        """Counts started iterations"""
-
-        self.squared_errors: Tensor = torch.ones(self.pixel_weights.shape, dtype=torch.float32)
-        """(shape[N]) Stores squared errors for pixels"""
-
-    def __iter__(self):
-        self.num_iters += 1
-        yield from super(ImportantPixelSampler, self).__iter__()
-
-    def update_errors(self, idxs: Tensor, errors: Tensor):
-        """Update squared errors and weights for given indicies
-
-        Args:
-            idxs (shape[K]): Specifies which indicies to edit weights on
-            errors (shape[K]): Freshly calculated squared errors for the idxs
-        """
-        errors = errors.clone().cpu().detach()
-        # Epsilon evaluates to 5e-3 as the prev value contributes 20%
-        self.squared_errors[idxs] = self.squared_errors[idxs] * 0.2 + errors * 0.8 + 4e-3  # Discounted error update
-        pxw = torch.clamp(torch.tensor([1.0], dtype=torch.float32) - self.num_iters / self.swap_strategy_iter, 0.0, 1.0)
-        self.weights[idxs] = self.pixel_weights[idxs] * pxw + self.squared_errors[idxs] * (1 - pxw)
 
 
 def sample_ray_uniformally(origins: Tensor, directions: Tensor, near: float, far: float,
