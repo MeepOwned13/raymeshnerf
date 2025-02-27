@@ -6,6 +6,7 @@ lightning==2.5.0.post0
 matplotlib==3.10.0
 notebook==7.3.2
 numpy==2.1.2
+tensorboard==2.19.0
 torch==2.6.0+cu126
 torchaudio==2.6.0+cu126
 torchmetrics==1.6.1

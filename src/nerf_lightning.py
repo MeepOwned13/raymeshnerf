@@ -263,10 +263,10 @@ if __name__ == '__main__':
         torch.set_float32_matmul_precision('high')
 
     data = NeRFData("data/tiny_nerf_data.npz")
-    # TODO: need better NeRF init to avoid starting in local minima (train loss usually doesn't move from above 0.3 when this happens)
     module = LNeRF()
     logger = TensorBoardLogger(".", default_hp_metric=False)
     # TODO: make progress bar display progress of epochs
-    trainer = L.Trainer(max_epochs=100_000, check_val_every_n_epoch=500, log_every_n_steps=1, logger=logger)
+    # TODO: implement checkpoints
+    trainer = L.Trainer(max_epochs=100_000, check_val_every_n_epoch=1000, log_every_n_steps=1, logger=logger)
     trainer.fit(module, datamodule=data)
 

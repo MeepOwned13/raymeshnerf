@@ -89,6 +89,9 @@ class NeRF(nn.Module):
 
         self.sigma_fc = nn.Linear(hidden_size, 1)
         """Linear layer for sigma calculation"""
+        with torch.no_grad():
+            # Proposed fix for starting in local minima, ensures rays terminate so colors are rendered at init
+            self.sigma_fc.bias.fill_(0.5)
 
         self.color_preproc = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
@@ -103,7 +106,7 @@ class NeRF(nn.Module):
             nn.Linear(hidden_size // 2, 3),
             nn.Sigmoid(),
         )
-        """Linear layer for RGB calculation"""
+        """Linear layers for RGB calculation"""
 
     def forward(self, coordinates: Tensor, directions: Tensor, skip_colors: bool = False) -> Tensor:
         """Perform RGBS calculation
