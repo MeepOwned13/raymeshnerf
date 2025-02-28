@@ -1,18 +1,20 @@
 import torch
 from torch import Tensor
-from torch.nn import MSELoss
+from torch.nn import MSELoss, Upsample
 from torchvision.utils import make_grid
 from torch.utils.data import TensorDataset, DataLoader
 from torchmetrics.image import PeakSignalNoiseRatio
 import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.callbacks import RichProgressBar, ModelCheckpoint
 
 import utils as U
 
 
 class NeRFData(L.LightningDataModule):
-    def __init__(self, path: str, batch_size: int = 1024, swap_strategy_iter: int = 100_000,
-                 edge_weight_epsilon: float = 0.33):
+    def __init__(self, path: str, batch_size: int = 1024, swap_strategy_iter: int = 10_000,
+                 edge_weight_epsilon: float = 0.33, horizontal_val_angles: int = 4,
+                 vertical_val_angles: int = 3):
         """Init
 
         Args:
@@ -27,16 +29,19 @@ class NeRFData(L.LightningDataModule):
     def load_from_file(self):
         ext = self.hparams.path.split(".")[-1]
         if ext == "npz":
-            return U.data.load_npz(self.hparams.path)
+            return U.data.load_npz(path=self.hparams.path)
 
     def setup(self, stage: str):
         images, c2ws, focal = self.load_from_file()
-        self.hparams.near, self.hparams.far = U.rays.compute_near_far_planes(c2ws)
+        self.hparams.near, self.hparams.far = U.data.compute_near_far_planes(c2ws=c2ws)
         self.hparams.focal = focal.item()
         self.save_hyperparameters()
 
-        # TODO: make a deterministic approach to decide val images (choose highly different angles)
-        val_idxs = [1, 23, 42, 56, 69, 81, 95, 100]
+        val_idxs = U.data.find_val_angles(
+            c2ws=c2ws,
+            horizontal_partitions=self.hparams.horizontal_val_angles,
+            vertical_partitions=self.hparams.vertical_val_angles,
+        )
         val_imgs, val_c2ws = images[val_idxs], c2ws[val_idxs]
 
         train_idxs = [i for i in range(images.shape[0]) if i not in val_idxs]
@@ -91,7 +96,7 @@ class NeRFData(L.LightningDataModule):
 class LNeRF(L.LightningModule):
     def __init__(self, num_layers: int = 8, hidden_size: int = 256, in_coordinates: int = 3, in_directions: int = 3,
                  skips: list[int] = [4], coord_encode_freq: int = 10, dir_encode_freq: int = 4,
-                 coarse_samples: int = 64, fine_samples: int = 64, lr: float = 5e-5):
+                 coarse_samples: int = 64, fine_samples: int = 64, lr: float = 5e-5, **kwargs):
         """Init
 
         Args:
@@ -121,7 +126,7 @@ class LNeRF(L.LightningModule):
 
     def compute_along_rays(self, origins: Tensor, directions: Tensor, near: float | None = None,
                            far: float | None = None, coarse_samples: int | None = None, fine_samples: int | None = None,
-                           deterministic: bool = True) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+                           deterministic: bool = True, **kwargs) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Uniformally and Hierarchically sample rays and calculate RGBS using NeRF
 
         Args:
@@ -135,13 +140,12 @@ class LNeRF(L.LightningModule):
 
         Returns:
             coarse_rgbs (shape[N, coarse_samples, 4]): RGBS predicted by NeRF for uniform samples
-            coarse_depths (shape[N, coarse_samples]): Depths sampled uniformally, always sorted and aligned to coarse_rgbs
+            coarse_depths (shape[N, coarse_samples]): Depths sampled uniformally, sorted and aligned to coarse_rgbs
             fine_rgbs (shape[N, fine_samples, 4]): RGBS predicted by NeRF for hierarchical samples
-            fine_depths (shape[N, fine_samples]): Depths sampled hierarchically, always sorted and aligned to fine_rgbs
+            fine_depths (shape[N, fine_samples]): Depths sampled hierarchically, sorted and aligned to fine_rgbs
         """
-        # TODO: allow hparams to be assigned to this class as well (another or needed)
-        near = near or self.trainer.datamodule.hparams.near
-        far = far or self.trainer.datamodule.hparams.far
+        near = self.hparams.get("near", near) or self.trainer.datamodule.hparams.near
+        far = self.hparams.get("far", far) or self.trainer.datamodule.hparams.far
         coarse_samples = coarse_samples or self.hparams.coarse_samples
         fine_samples = fine_samples or self.hparams.fine_samples
 
@@ -197,17 +201,21 @@ class LNeRF(L.LightningModule):
         Returns:
             image (shape[height, width, 3]): Rendered image
         """
-        # TODO: allow hparams to be assigned to this class as well (another or needed)
-        near = near or self.trainer.datamodule.hparams.near
-        far = far or self.trainer.datamodule.hparams.far
-        batch_size = batch_size or self.trainer.datamodule.hparams.batch_size
+        near = self.hparams.get("near", near) or self.trainer.datamodule.hparams.near
+        far = self.hparams.get("far", far) or self.trainer.datamodule.hparams.far
+        batch_size = self.hparams.get("batch_size", batch_size) or self.trainer.datamodule.hparams.batch_size
 
         intrinsic = torch.tensor([
             [focal.item(), 0, width // 2],
             [0, focal.item(), height // 2],
             [0, 0, 1],
         ], dtype=torch.float32, device=self.device)
-        origins, directions = U.rays.create_rays(height, width, intrinsic, c2w)
+        origins, directions = U.rays.create_rays(
+            height=height,
+            width=width,
+            intrinsic=intrinsic,
+            c2w=c2w
+        )
         origins, directions = origins.flatten(0, -2), directions.flatten(0, -2)
         data = DataLoader(TensorDataset(origins, directions), batch_size=batch_size, shuffle=False)
 
@@ -223,15 +231,16 @@ class LNeRF(L.LightningModule):
         i, origins, directions, colors = batch
         coarse_rgbs, coarse_depths, fine_rgbs, fine_depths = self.compute_along_rays(origins, directions)
 
-        coarse_colors, _ = U.rays.render_rays(coarse_rgbs, coarse_depths)
-        fine_colors, _ = U.rays.render_rays(fine_rgbs, fine_depths)
+        coarse_colors, _ = U.rays.render_rays(rgbs=coarse_rgbs, depths=coarse_depths)
+        fine_colors, _ = U.rays.render_rays(rgbs=fine_rgbs, depths=fine_depths)
         loss = (self.mse(coarse_colors, colors) + self.mse(fine_colors, colors)).mean(dim=-1)
-        self.trainer.train_dataloader.sampler.update_errors(i.cpu(), loss)
-        loss = loss.mean()
+        # Updating squared errors in ImportantPixelSampler to re-weight the used rays
+        self.trainer.train_dataloader.sampler.update_errors(idxs=i.cpu(), errors=loss)
 
+        loss = loss.mean()
         self.log("train_loss", loss, prog_bar=True, on_epoch=True, on_step=False)
         return loss
-    
+
     def on_validation_epoch_start(self):
         self.val_imgs = []
 
@@ -248,10 +257,14 @@ class LNeRF(L.LightningModule):
 
         self.val_imgs.append(render)
         return metrics
-    
+
     def on_validation_epoch_end(self):
-        images = torch.cat(self.val_imgs, dim=0)
-        self.logger.experiment.add_image(f"Renders", make_grid(images, nrow=4, padding=4), self.current_epoch)
+        if self.current_epoch != 0:
+            images = torch.cat(self.val_imgs, dim=0)
+            with torch.no_grad():
+                images = Upsample(scale_factor=2, mode="nearest")(images)  # upsampling for better display
+            self.logger.experiment.add_image("Renders", make_grid(images, nrow=4, padding=5), self.current_epoch)
+
         self.val_imgs.clear()
 
     def configure_optimizers(self):
@@ -266,7 +279,14 @@ if __name__ == '__main__':
     module = LNeRF()
     logger = TensorBoardLogger(".", default_hp_metric=False)
     # TODO: make progress bar display progress of epochs
-    # TODO: implement checkpoints
-    trainer = L.Trainer(max_epochs=100_000, check_val_every_n_epoch=1000, log_every_n_steps=1, logger=logger)
+    trainer = L.Trainer(
+        max_epochs=100_001, check_val_every_n_epoch=1000, log_every_n_steps=1, logger=logger,
+        callbacks=[
+            ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max"),
+            ModelCheckpoint(filename="{epoch}", every_n_epochs=200, monitor="epoch",
+                            mode="max", save_on_train_epoch_end=True),
+            RichProgressBar(),
+        ]
+    )
     trainer.fit(module, datamodule=data)
 

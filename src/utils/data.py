@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 from torch.utils.data import WeightedRandomSampler
+import torch.nn.functional as F
 import numpy as np
 
 from .rays import create_rays, sobel_filter
@@ -94,6 +95,84 @@ class ImportantPixelSampler(WeightedRandomSampler):
         self.squared_errors[idxs] = self.squared_errors[idxs] * 0.2 + errors * 0.8 + 4e-3  # Discounted error update
         pxw = torch.clamp(torch.tensor([1.0], dtype=torch.float32) - self.num_iters / self.swap_strategy_iter, 0.0, 1.0)
         self.weights[idxs] = self.pixel_weights[idxs] * pxw + self.squared_errors[idxs] * (1 - pxw)
+
+
+def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical_partitions: int = 2):
+    """Deterministically get validation angle indicies from extrinsic camera matrices
+
+    Args:
+        c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
+        horizontal_partitions: #angles to get along the horizontal plane
+        vertical_partitions: #angles to get along the vertical plane
+
+    Returns:
+        idxs (shape[horizontal_partitions * vertical_partitions]): Indicies of chosen validation angles
+    """
+    # Using spherical coordinates so choosing the middle of the partitions is easier
+    positions = c2ws[:, :3, -1].clone()
+    positions = F.normalize(positions, "fro", -1)
+    cam_theta = torch.atan2(positions[..., 1], positions[..., 0])
+    cam_phi = torch.arcsin(positions[..., 2])
+
+    # Taking middle of partitions to find closest camera angle
+    inclination_step = (cam_theta.max() - cam_theta.min()) / horizontal_partitions
+    azimuth_step = (cam_phi.max() - cam_phi.min()) / vertical_partitions
+    part_theta, part_phi = torch.meshgrid(
+        torch.arange(cam_theta.min() + inclination_step / 2, cam_theta.max(), inclination_step),
+        torch.arange(cam_phi.min() + azimuth_step / 2, cam_phi.max(), azimuth_step),
+        indexing="ij"
+    )
+
+    part_theta, part_phi = part_theta.flatten().unsqueeze(0), part_phi.flatten().unsqueeze(0)
+    cam_theta, cam_phi = cam_theta.unsqueeze(1), cam_phi.unsqueeze(1)
+    # N,1 | 1,K -> N,K
+    distances = torch.sqrt(
+        2 - 2 * torch.sin(cam_theta) * torch.sin(part_theta) * torch.cos(cam_phi - part_phi) +
+        torch.cos(cam_theta) * torch.cos(part_theta)
+    )
+
+    return torch.argmin(distances, dim=0)
+
+
+def compute_near_far_planes(c2ws: Tensor) -> tuple[float, float]:
+    """Compute minimal near and maximal far plane
+
+    Transforms the box bounded by -1 to 1 in World coordinates to camera
+    and finds the minimal near plane and maximal far plane based on distance
+
+    Args:
+        c2ws (shape[K, 4, 4]): Extrinsic camera matrices (Camera to World)
+
+    Returns:
+        near_plane: Minimal near plane found
+        far_plane: Maximal far plane found
+    """
+    scene_bounds_min = torch.tensor([-1, -1, -1], dtype=torch.float32)
+    scene_bounds_max = torch.tensor([1, 1, 1], dtype=torch.float32)
+
+    # Transform bounding box corners to camera coordinates
+    corners = torch.tensor([
+        [scene_bounds_min[0], scene_bounds_min[1], scene_bounds_min[2]],
+        [scene_bounds_min[0], scene_bounds_min[1], scene_bounds_max[2]],
+        [scene_bounds_min[0], scene_bounds_max[1], scene_bounds_min[2]],
+        [scene_bounds_min[0], scene_bounds_max[1], scene_bounds_max[2]],
+        [scene_bounds_max[0], scene_bounds_min[1], scene_bounds_min[2]],
+        [scene_bounds_max[0], scene_bounds_min[1], scene_bounds_max[2]],
+        [scene_bounds_max[0], scene_bounds_max[1], scene_bounds_min[2]],
+        [scene_bounds_max[0], scene_bounds_max[1], scene_bounds_max[2]],
+    ])
+
+    nears, fars = [], []
+    for c2w in c2ws:
+        corners_camera = (c2w[:3, :3] @ corners.T).T + c2w[:3, -1]
+        distances = torch.norm(corners_camera, "fro", dim=1)
+        nears.append(torch.min(distances))
+        fars.append(torch.max(distances))
+
+    near_plane = min(distances) * 0.9  # Slightly smaller than the closest point
+    far_plane = max(distances) * 1.1  # Slightly larger than the farthest point
+
+    return near_plane.item(), far_plane.item()
 
 
 def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:

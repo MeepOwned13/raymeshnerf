@@ -44,47 +44,6 @@ def create_rays(height: int, width: int, intrinsic: Tensor, c2w: Tensor) -> tupl
     return ray_origins, ray_directions
 
 
-def compute_near_far_planes(c2ws: Tensor) -> tuple[float, float]:
-    """Compute minimal near and maximal far plane
-
-    Transforms the box bounded by -1 to 1 in World coordinates to camera
-    and finds the minimal near plane and maximal far plane based on distance
-
-    Args:
-        c2ws (shape[K, 4, 4]): Extrinsic camera matrices (Camera to World)
-
-    Returns:
-        near_plane: Minimal near plane found
-        far_plane: Maximal far plane found
-    """
-    scene_bounds_min = torch.tensor([-1, -1, -1], dtype=torch.float32)
-    scene_bounds_max = torch.tensor([1, 1, 1], dtype=torch.float32)
-
-    # Transform bounding box corners to camera coordinates
-    corners = torch.tensor([
-        [scene_bounds_min[0], scene_bounds_min[1], scene_bounds_min[2]],
-        [scene_bounds_min[0], scene_bounds_min[1], scene_bounds_max[2]],
-        [scene_bounds_min[0], scene_bounds_max[1], scene_bounds_min[2]],
-        [scene_bounds_min[0], scene_bounds_max[1], scene_bounds_max[2]],
-        [scene_bounds_max[0], scene_bounds_min[1], scene_bounds_min[2]],
-        [scene_bounds_max[0], scene_bounds_min[1], scene_bounds_max[2]],
-        [scene_bounds_max[0], scene_bounds_max[1], scene_bounds_min[2]],
-        [scene_bounds_max[0], scene_bounds_max[1], scene_bounds_max[2]],
-    ])
-
-    nears, fars = [], []
-    for c2w in c2ws:
-        corners_camera = (c2w[:3, :3] @ corners.T).T + c2w[:3, -1]
-        distances = torch.norm(corners_camera, "fro", dim=1)
-        nears.append(torch.min(distances))
-        fars.append(torch.max(distances))
-
-    near_plane = min(distances) * 0.9  # Slightly smaller than the closest point
-    far_plane = max(distances) * 1.1  # Slightly larger than the farthest point
-
-    return near_plane.item(), far_plane.item()
-
-
 @torch.no_grad()
 def sobel_filter(images: Tensor) -> Tensor:
     """Applies the Sobel-Feldman operator to a batch of images
