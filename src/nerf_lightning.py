@@ -6,7 +6,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from torchmetrics.image import PeakSignalNoiseRatio
 import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
-from lightning.pytorch.callbacks import RichProgressBar, ModelCheckpoint, StochasticWeightAveraging
+from lightning.pytorch.callbacks import RichProgressBar, ModelCheckpoint
 
 import utils as U
 
@@ -96,7 +96,7 @@ class NeRFData(L.LightningDataModule):
 class LNeRF(L.LightningModule):
     def __init__(self, num_layers: int = 8, hidden_size: int = 256, in_coordinates: int = 3, in_directions: int = 3,
                  skips: list[int] = [4], coord_encode_freq: int = 10, dir_encode_freq: int = 4,
-                 coarse_samples: int = 64, fine_samples: int = 128, lr: float = 1e-5, **kwargs):
+                 coarse_samples: int = 64, fine_samples: int = 128, lr: float = 1e-4, **kwargs):
         """Init
 
         Args:
@@ -281,9 +281,8 @@ if __name__ == '__main__':
     # TODO: make progress bar display progress of epochs
     trainer = L.Trainer(
         max_epochs=200_001, check_val_every_n_epoch=1000, log_every_n_steps=1, logger=logger,
-        gradient_clip_val=1.0,
+        gradient_clip_val=2.0, gradient_clip_algorithm="norm",
         callbacks=[
-            StochasticWeightAveraging(swa_lrs=1e-2),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max"),
             ModelCheckpoint(filename="{epoch}", every_n_epochs=200, monitor="epoch",
                             mode="max", save_on_train_epoch_end=True),
