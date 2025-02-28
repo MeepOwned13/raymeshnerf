@@ -91,7 +91,7 @@ class NeRF(nn.Module):
         """Linear layer for sigma calculation"""
         with torch.no_grad():
             # Proposed fix for starting in local minima, ensures rays terminate so colors are rendered at init
-            self.sigma_fc.bias.fill_(0.33)
+            self.sigma_fc.bias.fill_(0.5)
 
         self.color_preproc = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
