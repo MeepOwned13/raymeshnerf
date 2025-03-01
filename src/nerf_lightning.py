@@ -12,7 +12,7 @@ import utils as U
 
 
 class NeRFData(L.LightningDataModule):
-    def __init__(self, path: str, batch_size: int = 1024, swap_strategy_iter: int = 10_000,
+    def __init__(self, path: str, batch_size: int = 1024, swap_strategy_iter: int = 4000,
                  edge_weight_epsilon: float = 0.33, horizontal_val_angles: int = 4,
                  vertical_val_angles: int = 3):
         """Init
@@ -96,7 +96,7 @@ class NeRFData(L.LightningDataModule):
 class LNeRF(L.LightningModule):
     def __init__(self, num_layers: int = 8, hidden_size: int = 256, in_coordinates: int = 3, in_directions: int = 3,
                  skips: list[int] = [4], coord_encode_freq: int = 10, dir_encode_freq: int = 4,
-                 coarse_samples: int = 64, fine_samples: int = 128, lr: float = 1e-4, **kwargs):
+                 coarse_samples: int = 64, fine_samples: int = 128, lr: float = 2e-4, **kwargs):
         """Init
 
         Args:
@@ -275,13 +275,13 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('high')
 
-    data = NeRFData("data/tiny_nerf_data.npz")
+    data = NeRFData("data/tiny_nerf_data.npz", batch_size=800)
     module = LNeRF()
     logger = TensorBoardLogger(".", default_hp_metric=False)
     # TODO: make progress bar display progress of epochs
     trainer = L.Trainer(
         max_epochs=200_001, check_val_every_n_epoch=1000, log_every_n_steps=1, logger=logger,
-        gradient_clip_val=2.0, gradient_clip_algorithm="norm",
+        gradient_clip_val=1.75, gradient_clip_algorithm="norm",
         callbacks=[
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max"),
             ModelCheckpoint(filename="{epoch}", every_n_epochs=200, monitor="epoch",

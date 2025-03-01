@@ -52,7 +52,8 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor,
 class ImportantPixelSampler(WeightedRandomSampler):
     """Sampler implementing Importan Pixels Sampling for NeRF"""
 
-    def __init__(self, weights: Tensor, num_samples: int, replacement: bool = True, swap_strategy_iter: int = 100):
+    def __init__(self, weights: Tensor, num_samples: int, replacement: bool = True, swap_strategy_iter: int = 100,
+                 step_epsilon: float = 1e-4):
         """Init
 
         Args:
@@ -60,6 +61,7 @@ class ImportantPixelSampler(WeightedRandomSampler):
             num_samples: Number of samples to draw per __iter__ (epoch)
             replacement: Choose /w replacement?
             swap_strategy_iter: Specifies at which iteration Squared Error sampling takes over fully
+            step_epsilon: Increase of weights not being chosen
         """
         super(ImportantPixelSampler, self).__init__(weights=weights,
                                                     num_samples=num_samples, replacement=replacement, generator=None)
@@ -72,6 +74,9 @@ class ImportantPixelSampler(WeightedRandomSampler):
 
         self.swap_strategy_iter: int = swap_strategy_iter
         """Specifies at which iteration Squared Error sampling takes over fully"""
+
+        self.step_epsilon: float = step_epsilon
+        """Increase of weights not being chosen"""
 
         self.num_iters: int = 0
         """Counts started iterations"""
@@ -93,6 +98,7 @@ class ImportantPixelSampler(WeightedRandomSampler):
         errors = errors.clone().cpu().detach()
         # Epsilon evaluates to 5e-3 as the prev value contributes 20%
         self.squared_errors[idxs] = self.squared_errors[idxs] * 0.2 + errors * 0.8 + 4e-3  # Discounted error update
+        self.weights += self.step_epsilon  # Increase weights of entries not chosen, needed to re-evaluate areas
         pxw = torch.clamp(torch.tensor([1.0], dtype=torch.float32) - self.num_iters / self.swap_strategy_iter, 0.0, 1.0)
         self.weights[idxs] = self.pixel_weights[idxs] * pxw + self.squared_errors[idxs] * (1 - pxw)
 
