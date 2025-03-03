@@ -1,0 +1,15 @@
+ipykernel==6.29.5
+ipython==8.32.0
+ipywidgets==8.1.5
+jupyter==1.1.1
+lightning==2.5.0.post0
+matplotlib==3.10.0
+notebook==7.3.2
+numpy==2.1.2
+tensorboard==2.19.0
+torch==2.6.0+cu126
+torchaudio==2.6.0+cu126
+torchmetrics==1.6.1
+torchvision==0.21.0+cu126
+tqdm==4.67.1
+rich==13.9.4
