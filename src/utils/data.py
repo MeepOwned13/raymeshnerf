@@ -221,7 +221,7 @@ def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:
     data = np.load(path)
 
     images = torch.from_numpy(data["images"]).to(torch.float32)
-    c2ws = torch.from_numpy(data["poses"]).to(torch.float32)
+    c2ws = torch.from_numpy(data["c2ws"]).to(torch.float32)
     focal = torch.from_numpy(data["focal"]).to(torch.float32)
 
     return images, c2ws, focal
