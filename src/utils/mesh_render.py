@@ -14,7 +14,7 @@ from mitsuba import ScalarTransform4f as ST
 
 def load_and_normalize_mesh(obj_path: Path) -> mi.Mesh:
     """Loads and normalizes mesh to [-1,1] bbox
-    
+
     Args:
         obj_path: Path to the object root
 
@@ -46,7 +46,6 @@ def load_and_normalize_mesh(obj_path: Path) -> mi.Mesh:
     return mesh
 
 
-
 def sensor_c2w(sensor: mi.Sensor) -> np.ndarray:
     """Converts mitsuba sensor to Extrinsic camera matrix
 
@@ -56,7 +55,7 @@ def sensor_c2w(sensor: mi.Sensor) -> np.ndarray:
     Returns:
         transformation(shape[4, 4]): Extrinsic camera matrix
     """
-    transformation = np.array(sensor.world_transform().matrix, dtype=np.float32)[:,:,0]
+    transformation = np.array(sensor.world_transform().matrix, dtype=np.float32)[:, :, 0]
     # after experimentation, this -1 multiplier is required to get correct ray directions
     transformation[:3, :3] *= -1
     return transformation
@@ -97,7 +96,6 @@ def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 4
             up=[0, 0, 1],
         )
     }) for theta, phi in zip(thetas, phis)]
-
 
     extrinsics: np.ndarray = np.stack([sensor_c2w(s) for s in sensors], axis=0)
 
@@ -161,7 +159,7 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
         fov_x=fov_x,
         deterministic=deterministic,
     )
-    render = np.asarray(mi.render(scene, sensor=sensor), dtype=np.float32).clip(0,1)
+    render = np.asarray(mi.render(scene, sensor=sensor), dtype=np.float32).clip(0, 1)
     images = np.asarray(mi.Bitmap(render).convert(srgb_gamma=True, component_format=mi.Struct.Type.Float32))
     images = images.reshape(800, -1, 800, 3).transpose(1, 0, 2, 3)
 

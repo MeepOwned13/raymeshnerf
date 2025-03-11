@@ -12,7 +12,7 @@ import utils as U
 
 
 class NeRFData(L.LightningDataModule):
-    def __init__(self, path: str, batch_size: int = 1024, swap_strategy_iter: int = 4000,
+    def __init__(self, object_name: str, batch_size: int = 1024, swap_strategy_iter: int = 4000,
                  edge_weight_epsilon: float = 0.33, horizontal_val_angles: int = 4,
                  vertical_val_angles: int = 3):
         """Init
@@ -27,9 +27,7 @@ class NeRFData(L.LightningDataModule):
         self.save_hyperparameters()
 
     def load_from_file(self):
-        ext = self.hparams.path.split(".")[-1]
-        if ext == "npz":
-            return U.data.load_npz(path=self.hparams.path)
+        return U.data.load_obj_data(self.hparams.object_name)
 
     def setup(self, stage: str):
         images, c2ws, focal = self.load_from_file()
@@ -275,7 +273,7 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('high')
 
-    data = NeRFData("data/tiny_nerf_data.npz", batch_size=800)
+    data = NeRFData("Weisshai_Great_White_Shark", batch_size=800)
     module = LNeRF()
     logger = TensorBoardLogger(".", default_hp_metric=False)
     # TODO: make progress bar display progress of epochs

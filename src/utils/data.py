@@ -3,8 +3,10 @@ from torch import Tensor
 from torch.utils.data import WeightedRandomSampler
 import torch.nn.functional as F
 import numpy as np
+from pathlib import Path
 
 from .rays import create_rays, sobel_filter
+from .mesh_render import render_mesh
 
 
 def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor,
@@ -53,7 +55,7 @@ class ImportantPixelSampler(WeightedRandomSampler):
     """Sampler implementing Importan Pixels Sampling for NeRF"""
 
     def __init__(self, weights: Tensor, num_samples: int, replacement: bool = True, swap_strategy_iter: int = 100,
-                 step_epsilon: float = 1e-4, grouping_factor: int = 2 ** 24 -1):
+                 step_epsilon: float = 1e-4, grouping_factor: int = 2 ** 24 - 1):
         """Init
 
         Args:
@@ -103,7 +105,7 @@ class ImportantPixelSampler(WeightedRandomSampler):
             randoms.append(torch.multinomial(
                 self.weights[int(low):int(high)], gc, self.replacement, generator=self.generator
             ))
-        
+
         yield from iter(torch.cat(randoms).flatten().tolist())
 
     def update_errors(self, idxs: Tensor, errors: Tensor):
@@ -225,4 +227,41 @@ def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:
     focal = torch.from_numpy(data["focal"]).to(torch.float32)
 
     return images, c2ws, focal
+
+
+def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str = "data/",
+                  verbose: bool = True) -> tuple[Tensor, Tensor, Tensor]:
+    """Loads object data from disk, or renders if doesn't exist, follows Google Scanned Objects mesh format
+
+    Args:
+        obj_name: Name of object directory under directory
+        sensor_count: Number of view angles to render if rendering is required
+        directory: Directory to search objects under
+        verbose: Print rendering info
+
+    Returns:
+        images (shape[N, H, W, 3]): Images
+        c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
+        focal (shape[]): Focal length
+    """
+    npz_path: Path = (Path(directory) / f"{obj_name}.npz").resolve().absolute()
+    if not npz_path.exists():
+        obj_path: Path = (Path(directory) / "raw_objects" / obj_name).resolve().absolute()
+        if not obj_path.is_dir():
+            raise ValueError(f"Directory of object '{obj_name}' doesn't exist")
+
+        if verbose:
+            print(f"Render of object '{obj_name}' not found, rendering {sensor_count} angles")
+
+        images, c2ws, focal = render_mesh(
+            obj_path=obj_path,
+            sensor_count=sensor_count
+        )
+        np.savez_compressed(npz_path, images=images, c2ws=c2ws, focal=focal)
+
+        if verbose:
+            print(f"Render of '{obj_name}' complete")
+
+    return load_npz(npz_path)
+
 
