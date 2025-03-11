@@ -53,7 +53,7 @@ class ImportantPixelSampler(WeightedRandomSampler):
     """Sampler implementing Importan Pixels Sampling for NeRF"""
 
     def __init__(self, weights: Tensor, num_samples: int, replacement: bool = True, swap_strategy_iter: int = 100,
-                 step_epsilon: float = 1e-4):
+                 step_epsilon: float = 1e-4, grouping_factor: int = 2 ** 24 -1):
         """Init
 
         Args:
@@ -84,9 +84,27 @@ class ImportantPixelSampler(WeightedRandomSampler):
         self.squared_errors: Tensor = torch.ones(self.pixel_weights.shape, dtype=torch.float32)
         """(shape[N]) Stores squared errors for pixels"""
 
+        # Grouping needed since multinomial can only take 2**24 inputs
+        groups = list(range(0, weights.shape[0], grouping_factor)) + [weights.shape[0]]
+        self.groups = torch.tensor([
+            (low, high, self.weights[low:high].sum()) for low, high in zip(groups[:-1], groups[1:])
+        ], dtype=torch.float32)
+        """(shape[num_groups, 3]) Stores low, high, group weight per row, required for
+        sampling weights over size 2**24-1"""
+
     def __iter__(self):
         self.num_iters += 1
-        yield from super(ImportantPixelSampler, self).__iter__()
+        group_sample = torch.multinomial(self.groups[..., -1], self.num_samples, replacement=True)
+        groups, group_counts = group_sample.unique(sorted=False, return_counts=True)
+
+        randoms = []
+        for g, gc in zip(groups, group_counts):
+            low, high, _ = self.groups[g]
+            randoms.append(torch.multinomial(
+                self.weights[int(low):int(high)], gc, self.replacement, generator=self.generator
+            ))
+        
+        yield from iter(torch.cat(randoms).flatten().tolist())
 
     def update_errors(self, idxs: Tensor, errors: Tensor):
         """Update squared errors and weights for given indicies
@@ -100,7 +118,15 @@ class ImportantPixelSampler(WeightedRandomSampler):
         self.squared_errors[idxs] = self.squared_errors[idxs] * 0.2 + errors * 0.8 + 4e-3  # Discounted error update
         self.weights += self.step_epsilon  # Increase weights of entries not chosen, needed to re-evaluate areas
         pxw = torch.clamp(torch.tensor([1.0], dtype=torch.float32) - self.num_iters / self.swap_strategy_iter, 0.0, 1.0)
+        old_weights = self.weights[idxs].clone()
         self.weights[idxs] = self.pixel_weights[idxs] * pxw + self.squared_errors[idxs] * (1 - pxw)
+
+        # Group wise update
+        for i in range(self.groups.shape[0]):
+            low, high, group_weight = self.groups[i]
+            mask = (idxs >= low) & (idxs < high)
+            group_weight += self.weights[idxs][mask].sum() - old_weights[mask].sum()
+            self.groups[i, -1] = group_weight
 
 
 def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical_partitions: int = 2):
