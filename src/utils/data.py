@@ -229,14 +229,14 @@ def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:
     return images, c2ws, focal
 
 
-def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str = "data/",
+def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None = None,
                   verbose: bool = True) -> tuple[Tensor, Tensor, Tensor]:
     """Loads object data from disk, or renders if doesn't exist, follows Google Scanned Objects mesh format
 
     Args:
         obj_name: Name of object directory under directory
         sensor_count: Number of view angles to render if rendering is required
-        directory: Directory to search objects under
+        directory: Directory to search objects under, defaults to project_root/data
         verbose: Print rendering info
 
     Returns:
@@ -244,6 +244,8 @@ def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str = "data/
         c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
         focal (shape[]): Focal length
     """
+    directory = directory or f"{__file__}/../../../data"
+
     npz_path: Path = (Path(directory) / f"{obj_name}.npz").resolve().absolute()
     if not npz_path.exists():
         obj_path: Path = (Path(directory) / "raw_objects" / obj_name).resolve().absolute()
