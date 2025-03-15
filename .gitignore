@@ -171,5 +171,6 @@ dmypy.json
 cython_debug/
 
 ### Project specific settings
-
-
+data/*
+!data/tiny_nerf_data.npz
+lightning_logs/

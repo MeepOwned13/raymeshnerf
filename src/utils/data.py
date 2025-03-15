@@ -3,8 +3,10 @@ from torch import Tensor
 from torch.utils.data import WeightedRandomSampler
 import torch.nn.functional as F
 import numpy as np
+from pathlib import Path
 
 from .rays import create_rays, sobel_filter
+from .mesh_render import render_mesh
 
 
 def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor,
@@ -53,7 +55,7 @@ class ImportantPixelSampler(WeightedRandomSampler):
     """Sampler implementing Importan Pixels Sampling for NeRF"""
 
     def __init__(self, weights: Tensor, num_samples: int, replacement: bool = True, swap_strategy_iter: int = 100,
-                 step_epsilon: float = 1e-4):
+                 step_epsilon: float = 1e-4, grouping_factor: int = 2 ** 24 - 1):
         """Init
 
         Args:
@@ -84,9 +86,27 @@ class ImportantPixelSampler(WeightedRandomSampler):
         self.squared_errors: Tensor = torch.ones(self.pixel_weights.shape, dtype=torch.float32)
         """(shape[N]) Stores squared errors for pixels"""
 
+        # Grouping needed since multinomial can only take 2**24 inputs
+        groups = list(range(0, weights.shape[0], grouping_factor)) + [weights.shape[0]]
+        self.groups = torch.tensor([
+            (low, high, self.weights[low:high].sum()) for low, high in zip(groups[:-1], groups[1:])
+        ], dtype=torch.float32)
+        """(shape[num_groups, 3]) Stores low, high, group weight per row, required for
+        sampling weights over size 2**24-1"""
+
     def __iter__(self):
         self.num_iters += 1
-        yield from super(ImportantPixelSampler, self).__iter__()
+        group_sample = torch.multinomial(self.groups[..., -1], self.num_samples, replacement=True)
+        groups, group_counts = group_sample.unique(sorted=False, return_counts=True)
+
+        randoms = []
+        for g, gc in zip(groups, group_counts):
+            low, high, _ = self.groups[g]
+            randoms.append(torch.multinomial(
+                self.weights[int(low):int(high)], gc, self.replacement, generator=self.generator
+            ))
+
+        yield from iter(torch.cat(randoms).flatten().tolist())
 
     def update_errors(self, idxs: Tensor, errors: Tensor):
         """Update squared errors and weights for given indicies
@@ -100,7 +120,15 @@ class ImportantPixelSampler(WeightedRandomSampler):
         self.squared_errors[idxs] = self.squared_errors[idxs] * 0.2 + errors * 0.8 + 4e-3  # Discounted error update
         self.weights += self.step_epsilon  # Increase weights of entries not chosen, needed to re-evaluate areas
         pxw = torch.clamp(torch.tensor([1.0], dtype=torch.float32) - self.num_iters / self.swap_strategy_iter, 0.0, 1.0)
+        old_weights = self.weights[idxs].clone()
         self.weights[idxs] = self.pixel_weights[idxs] * pxw + self.squared_errors[idxs] * (1 - pxw)
+
+        # Group wise update
+        for i in range(self.groups.shape[0]):
+            low, high, group_weight = self.groups[i]
+            mask = (idxs >= low) & (idxs < high)
+            group_weight += self.weights[idxs][mask].sum() - old_weights[mask].sum()
+            self.groups[i, -1] = group_weight
 
 
 def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical_partitions: int = 2):
@@ -195,8 +223,47 @@ def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:
     data = np.load(path)
 
     images = torch.from_numpy(data["images"]).to(torch.float32)
-    c2ws = torch.from_numpy(data["poses"]).to(torch.float32)
+    c2ws = torch.from_numpy(data["c2ws"]).to(torch.float32)
     focal = torch.from_numpy(data["focal"]).to(torch.float32)
 
     return images, c2ws, focal
+
+
+def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None = None,
+                  verbose: bool = True) -> tuple[Tensor, Tensor, Tensor]:
+    """Loads object data from disk, or renders if doesn't exist, follows Google Scanned Objects mesh format
+
+    Args:
+        obj_name: Name of object directory under directory
+        sensor_count: Number of view angles to render if rendering is required
+        directory: Directory to search objects under, defaults to project_root/data
+        verbose: Print rendering info
+
+    Returns:
+        images (shape[N, H, W, 3]): Images
+        c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
+        focal (shape[]): Focal length
+    """
+    directory = directory or f"{__file__}/../../../data"
+
+    npz_path: Path = (Path(directory) / f"{obj_name}.npz").resolve().absolute()
+    if not npz_path.exists():
+        obj_path: Path = (Path(directory) / "raw_objects" / obj_name).resolve().absolute()
+        if not obj_path.is_dir():
+            raise ValueError(f"Directory of object '{obj_name}' doesn't exist")
+
+        if verbose:
+            print(f"Render of object '{obj_name}' not found, rendering {sensor_count} angles")
+
+        images, c2ws, focal = render_mesh(
+            obj_path=obj_path,
+            sensor_count=sensor_count
+        )
+        np.savez_compressed(npz_path, images=images, c2ws=c2ws, focal=focal)
+
+        if verbose:
+            print(f"Render of '{obj_name}' complete")
+
+    return load_npz(npz_path)
+
 
