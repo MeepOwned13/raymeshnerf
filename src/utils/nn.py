@@ -1,5 +1,7 @@
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
+from .mlhhe import MultiLevelHybridHashEncoding
 
 
 class PositionalEncoding(nn.Module):
@@ -45,7 +47,7 @@ class PositionalEncoding(nn.Module):
 
 
 class NeRF(nn.Module):
-    """NeRF"""
+    """NeRF as per the original paper"""
 
     def __init__(self, num_layers: int = 8, hidden_size: int = 256, in_coordinates: int = 3, in_directions: int = 3,
                  skips: list[int] = [4], coord_encode_freq: int = 10, dir_encode_freq: int = 4):
@@ -141,3 +143,90 @@ class NeRF(nn.Module):
 
         return torch.cat([rgb, sigma], dim=-1)
 
+
+class InstantNGP(nn.Module):
+    """InstantNGP implementation using MLHHE from https://github.com/cheind"""
+
+    def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
+                 min_res: int = 32, max_res: int = 512, max_res_dense: int = 256):
+        """Init
+
+        Args:
+            hidden_size: Hidden size for Linear layers
+            encoding_log2: Log2 of encoding count for MLHHE
+            embed_dims: Output embedding dimensions for MLHHE
+            levels: Level count for MLHHE
+            min_res: Minimal resolution of MLHHE
+            max_res: Max resolution of MLHHE
+            max_res_dense: Resolution to swap to sparse encoding for MLHHE
+        """
+        super(InstantNGP, self).__init__()
+        self.mlhhe = MultiLevelHybridHashEncoding(
+            n_encodings=2 ** encoding_log2,
+            n_input_dims=3,
+            n_embed_dims=embed_dims,
+            n_levels=levels,
+            min_res=min_res,
+            max_res=max_res,
+            max_n_dense=max_res_dense ** 3,
+        )
+        """Multi-Level Hybrid Hash Encoding used for coordinate encoding"""
+
+        self.feature_mlp = nn.Sequential(
+            nn.Linear(levels * embed_dims, hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, 16), # index 0 is log density
+        )
+        """MLP processing encoded coordinates, output at index 0 is log of sigma"""
+
+        nn.init.constant_(self.feature_mlp[-1].bias[:1], -1.0)
+
+        self.direction_encoder = PositionalEncoding(2)  # TODO: Swap to spherical basis encoding
+        """Encoder for direction vectors"""
+
+        self.rgb_mlp = nn.Sequential(
+            nn.Linear(16 + 15, hidden_size),  # TODO: 15 should be 16 after spherical basis is implemented
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, 3),
+            nn.Sigmoid(),
+        )
+        """MLP processing features and directions to generate RGB values"""
+
+
+
+    def forward(self, coordinates: Tensor, directions: Tensor, skip_colors: bool = False):
+        """Perform RGBS calculation
+
+        coordinates and directions must have the same dimensions for *...
+
+        Args:
+            coordinates (shape[*..., in_coordinates]): Input point coordinates
+            directions (shape[*..., in_directions]): Input directions
+            skip_colors: Skip color calculation?
+
+        Returns:
+            rgbs (shape[*..., 4]): RGB&Sigma if skip_colors=False
+            rgbs (shape[*...]): Sigma if skip_colors=True
+        """
+        co_shape = list(coordinates.shape[:-1])
+        embeds = self.mlhhe(coordinates.reshape(-1, 3)).reshape(co_shape + [-1])
+
+        features = self.feature_mlp(embeds)
+        sigma = torch.exp(features[..., 0:1])
+
+        if skip_colors:
+            return sigma
+
+        features = torch.cat([
+            features,
+            self.direction_encoder(directions)
+        ], dim=-1)
+
+        rgb = self.rgb_mlp(features)
+        return torch.cat([rgb, sigma], dim=-1)
