@@ -9,21 +9,18 @@ from .rays import create_rays, sobel_filter
 from .mesh_render import render_mesh
 
 
-def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor,
-                     weight_epsilon: float = 0.33) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Creates rays for NeRF training
 
     Args:
         images (shape[N, H, W, 3]): Images to extract colors and sizes from
         c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
         focal (shape[]): Focal length
-        weight_epsilon: Added epsilon for pixel weights
 
     Returns:
         origins (shape[N * H * W, 3]): Ray origins in World coordinates
         directions (shape[N * H * W, 3]): Cartesian ray directions in World
         colors (shape[N * H * W, 3]): RGB colors for rays
-        pixel_weights (shape[N * H * W]): Sampling edge weights for rays
     """
     origins = []
     directions = []
@@ -47,8 +44,7 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor,
     directions = torch.cat(directions, dim=0)
     colors = torch.cat(colors, dim=0)
 
-    pixel_weights = sobel_filter(images).flatten() + weight_epsilon
-    return origins, directions, colors, pixel_weights
+    return origins, directions, colors
 
 
 class ImportantPixelSampler(WeightedRandomSampler):

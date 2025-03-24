@@ -6,22 +6,21 @@ from torch.utils.data import TensorDataset, DataLoader
 from torchmetrics.image import PeakSignalNoiseRatio
 import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
-from lightning.pytorch.callbacks import RichProgressBar, ModelCheckpoint
+from lightning.pytorch.callbacks import RichProgressBar, ModelCheckpoint, Callback
 
 import utils as U
 
 
 class NeRFData(L.LightningDataModule):
-    def __init__(self, object_name: str, batch_size: int = 1024, swap_strategy_iter: int = 4000,
-                 edge_weight_epsilon: float = 0.33, horizontal_val_angles: int = 4,
+    def __init__(self, object_name: str, batch_size: int = 1024, horizontal_val_angles: int = 4,
                  vertical_val_angles: int = 3):
         """Init
 
         Args:
             path: Path to data file
             batch_size: Batch size and epoch size
-            swap_strategy_iter: Specifies at which iteration Squared Error sampling takes over fully
-            edge_weight_epsilon: Epsilon to use when deciding pixel weights after edge detection
+            horizontal_val_angles: #angles to take for validation horizontally
+            vertical_val_angles: #angles to take for validation vertically
         """
         super().__init__()
         self.save_hyperparameters()
@@ -46,18 +45,14 @@ class NeRFData(L.LightningDataModule):
         train_imgs, train_c2ws = images[train_idxs], c2ws[train_idxs]
 
         if stage == "fit":
-            origins, directions, colors, pixel_weights = U.data.create_nerf_data(
+            origins, directions, colors = U.data.create_nerf_data(
                 images=train_imgs,
                 c2ws=train_c2ws,
                 focal=torch.tensor(self.hparams.focal, dtype=torch.float32),
-                weight_epsilon=self.hparams.edge_weight_epsilon
             )
 
             self.train_rays: TensorDataset = TensorDataset(torch.arange(origins.shape[0]), origins, directions, colors)
             """Dataset: (i, origins, directions, colors)"""
-
-            self.train_weights: Tensor = pixel_weights
-            """Edge weights for training rays"""
 
             self.val_data: TensorDataset = TensorDataset(
                 val_c2ws,
@@ -67,16 +62,10 @@ class NeRFData(L.LightningDataModule):
             """Dataset: (c2w, focal, image)"""
 
     def train_dataloader(self):
-        self.train_sampler: U.data.ImportantPixelSampler = U.data.ImportantPixelSampler(
-            weights=self.train_weights,
-            num_samples=self.hparams.batch_size,
-            replacement=True,
-            swap_strategy_iter=self.hparams.swap_strategy_iter
-        )
         return DataLoader(
             dataset=self.train_rays,
             batch_size=self.hparams.batch_size,
-            sampler=self.train_sampler,
+            shuffle=True,
             num_workers=4,
             persistent_workers=True,
         )
@@ -92,34 +81,51 @@ class NeRFData(L.LightningDataModule):
 
 
 class LNeRF(L.LightningModule):
-    def __init__(self, num_layers: int = 8, hidden_size: int = 256, in_coordinates: int = 3, in_directions: int = 3,
-                 skips: list[int] = [4], coord_encode_freq: int = 10, dir_encode_freq: int = 4,
-                 coarse_samples: int = 64, fine_samples: int = 128, lr: float = 2e-4, **kwargs):
+    def __init__(self, hidden_size: int = 64, encoding_log2: int = 18, embed_dims: int = 2, levels: int = 16,
+                 min_res: int = 16, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128, 
+                 f_sigma_init: float = 0.04, f_sigma_threshold:float = 0.01, f_stochastic_test: bool = True,
+                 f_update_decay: float = 0.7, f_update_noise_scale: float = None, f_update_selection_rate: float =0.25,
+                 coarse_samples: int = 64, fine_samples: int = 128, **kwargs):
         """Init
 
         Args:
-            num_layers: Layer count for primary feature MLP
-            hidden_size: Hidden size for all Linear layers
-            in_coordinates: Count of input point coordinates
-            in_directions: Count of input direction coordinates (spherical=>2, cartesian=>3)
-            skips: Skip connection list for primary feature MLP
-            coord_encode_freq: Max frequency for coordinate PE
-            dir_encode_freq: Max frequency for direction PE
-            lr: Learning rate
+            hidden_size: Hidden size for Linear layers
+            encoding_log2: Log2 of encoding count for MLHHE
+            embed_dims: Output embedding dimensions for MLHHE
+            levels: Level count for MLHHE
+            min_res: Minimal resolution of MLHHE
+            max_res: Max resolution of MLHHE
+            max_res_dense: Resolution to swap to sparse encoding for MLHHE
+            f_res: Occupancy Grid Filter resolution
+            f_sigma_init: OGF density init
+            f_sigma_threshold: OGF density threshold
+            f_stochastic_test: Toggles OGF stochastic test
+            f_update_decay: OGF update decay
+            f_update_noise_scale: OGF update noise scale
+            f_update_selection_rate: Rate of OGF update selection
+            coarse_samples: Initial samples to take per ray
+            fine_samples: Hierarchical resampling sample count
         """
         super().__init__()
         self.save_hyperparameters()
-        self.nerf = U.nn.NeRF(
-            num_layers=self.hparams.num_layers,
+        self.nerf = U.nn.InstantNGP(
             hidden_size=self.hparams.hidden_size,
-            in_coordinates=self.hparams.in_coordinates,
-            in_directions=self.hparams.in_directions,
-            skips=self.hparams.skips,
-            coord_encode_freq=self.hparams.coord_encode_freq,
-            dir_encode_freq=self.hparams.dir_encode_freq,
+            encoding_log2=self.hparams.encoding_log2,
+            embed_dims=self.hparams.embed_dims,
+            levels=self.hparams.levels,
+            min_res=self.hparams.min_res,
+            max_res=self.hparams.max_res,
+            max_res_dense=self.hparams.max_res_dense,
+            f_res=self.hparams.f_res,
+            f_sigma_init=self.hparams.f_sigma_init,
+            f_sigma_threshold=self.hparams.f_sigma_threshold,
+            f_stochastic_test=self.hparams.f_stochastic_test,
+            f_update_decay=self.hparams.f_update_decay,
+            f_update_noise_scale=self.hparams.f_update_noise_scale,
+            f_update_selection_rate=self.hparams.f_update_selection_rate,
         )
 
-        self.mse = MSELoss(reduction='none')
+        self.mse = MSELoss()
         self.psnr = PeakSignalNoiseRatio()
 
     def compute_along_rays(self, origins: Tensor, directions: Tensor, near: float | None = None,
@@ -231,11 +237,8 @@ class LNeRF(L.LightningModule):
 
         coarse_colors, _ = U.rays.render_rays(rgbs=coarse_rgbs, depths=coarse_depths)
         fine_colors, _ = U.rays.render_rays(rgbs=fine_rgbs, depths=fine_depths)
-        loss = (self.mse(coarse_colors, colors) + self.mse(fine_colors, colors)).mean(dim=-1)
-        # Updating squared errors in ImportantPixelSampler to re-weight the used rays
-        self.trainer.train_dataloader.sampler.update_errors(idxs=i.cpu(), errors=loss)
+        loss = self.mse(coarse_colors, colors) + self.mse(fine_colors, colors)
 
-        loss = loss.mean()
         self.log("train_loss", loss, prog_bar=True, on_epoch=True, on_step=False)
         return loss
 
@@ -266,23 +269,39 @@ class LNeRF(L.LightningModule):
         self.val_imgs.clear()
 
     def configure_optimizers(self):
-        return torch.optim.NAdam(self.nerf.parameters(), lr=self.hparams.lr)
+        return torch.optim.Adam([
+            {"params": self.nerf.mlhhe.parameters(), "lr": 1e-2, "betas": (0.9, 0.99), "eps": 1e-15, "weight_decay": 0.},
+            {"params": self.nerf.rgb_mlp.parameters(), "lr": 1e-2,  "betas": (0.9, 0.99), "eps": 1e-15, "weight_decay": 10**-6},
+            {"params": self.nerf.feature_mlp.parameters(), "lr": 1e-2,  "betas": (0.9, 0.99), "eps": 1e-15, "weight_decay": 10**-6}
+        ])
+    
+
+class OGFilterCallback(Callback):
+    def __init__(self, num_backprops: int = 8):
+        self.num_backprops = num_backprops
+        self._current = 0
+
+    def on_after_backward(self, _, module):
+        self._current += 1
+        if self._current >= self.num_backprops:
+            module.nerf.update_filter()
+            self._current = 0
 
 
 if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('high')
 
-    data = NeRFData("Weisshai_Great_White_Shark", batch_size=800)
+    data = NeRFData("tiny_nerf_data", batch_size=200)
     module = LNeRF()
     logger = TensorBoardLogger(".", default_hp_metric=False)
-    # TODO: make progress bar display progress of epochs
     trainer = L.Trainer(
-        max_epochs=200_001, check_val_every_n_epoch=1000, log_every_n_steps=1, logger=logger,
-        gradient_clip_val=1.75, gradient_clip_algorithm="norm",
+        max_epochs=101, check_val_every_n_epoch=1, log_every_n_steps=25, logger=logger,
+        accumulate_grad_batches=2**13 // data.hparams.batch_size,
         callbacks=[
+            OGFilterCallback(2**16 // 2**13),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max"),
-            ModelCheckpoint(filename="{epoch}", every_n_epochs=200, monitor="epoch",
+            ModelCheckpoint(filename="{epoch}", every_n_epochs=1, monitor="epoch",
                             mode="max", save_on_train_epoch_end=True),
             RichProgressBar(),
         ]
