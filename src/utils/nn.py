@@ -2,6 +2,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 from .mlhhe import MultiLevelHybridHashEncoding
+from .ogfilter import OccupancyGridFilter
 
 
 class PositionalEncoding(nn.Module):
@@ -148,7 +149,9 @@ class InstantNGP(nn.Module):
     """InstantNGP implementation using MLHHE from https://github.com/cheind"""
 
     def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
-                 min_res: int = 32, max_res: int = 512, max_res_dense: int = 256):
+                 min_res: int = 32, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128, 
+                 f_sigma_init=0.04, f_sigma_threshold=0.01, f_stochastic_test: bool = True,
+                 f_update_decay: float = 0.7, f_update_noise_scale: float = None, f_update_selection_rate=0.25):
         """Init
 
         Args:
@@ -159,8 +162,26 @@ class InstantNGP(nn.Module):
             min_res: Minimal resolution of MLHHE
             max_res: Max resolution of MLHHE
             max_res_dense: Resolution to swap to sparse encoding for MLHHE
+            f_res: Occupancy Grid Filter resolution
+            f_sigma_init: OGF density init
+            f_sigma_threshold: OGF density threshold
+            f_stochastic_test: Toggles OGF stochastic test
+            f_update_decay: OGF update decay
+            f_update_noise_scale: OGF update noise scale
+            f_update_selection_rate: Rate of OGF update selection
         """
         super(InstantNGP, self).__init__()
+        self.filter = OccupancyGridFilter(
+            res=f_res,
+            density_initial=f_sigma_init,
+            density_threshold=f_sigma_threshold,
+            stochastic_test=f_stochastic_test,
+            update_decay=f_update_decay,
+            update_noise_scale=f_update_noise_scale,
+            update_selection_rate=f_update_selection_rate,
+        )
+        """Occupancy Grid Filtering for coordinates"""
+
         self.mlhhe = MultiLevelHybridHashEncoding(
             n_encodings=2 ** encoding_log2,
             n_input_dims=3,
@@ -198,9 +219,7 @@ class InstantNGP(nn.Module):
         )
         """MLP processing features and directions to generate RGB values"""
 
-
-
-    def forward(self, coordinates: Tensor, directions: Tensor, skip_colors: bool = False):
+    def forward(self, coordinates: Tensor, directions: Tensor, skip_colors: bool = False, masked: bool = True):
         """Perform RGBS calculation
 
         coordinates and directions must have the same dimensions for *...
@@ -209,24 +228,40 @@ class InstantNGP(nn.Module):
             coordinates (shape[*..., in_coordinates]): Input point coordinates
             directions (shape[*..., in_directions]): Input directions
             skip_colors: Skip color calculation?
+            masked: Use occupancy grid filtering?
 
         Returns:
             rgbs (shape[*..., 4]): RGB&Sigma if skip_colors=False
             rgbs (shape[*...]): Sigma if skip_colors=True
         """
-        co_shape = list(coordinates.shape[:-1])
-        embeds = self.mlhhe(coordinates.reshape(-1, 3)).reshape(co_shape + [-1])
+        device = coordinates.device
+        out_shape = list(coordinates.shape[:-1])
 
+        coordinates = coordinates.reshape(-1, 3)
+        sigma = torch.zeros([coordinates.shape[0], 1], dtype=torch.float32, device=device)
+        rgb = torch.zeros([coordinates.shape[0], 3], dtype=torch.float32, device=device)
+        
+        mask = torch.ones(coordinates.shape[0], dtype=bool, device=device)
+        if masked:
+            mask = self.filter.test(coordinates)
+        coordinates = coordinates[mask]
+
+        embeds = self.mlhhe(coordinates).flatten(1, -1)
         features = self.feature_mlp(embeds)
-        sigma = torch.exp(features[..., 0:1])
+        sigma[mask] = torch.exp(features[..., 0:1])
 
         if skip_colors:
-            return sigma
+            return sigma.squeeze(-1).reshape(out_shape)
 
+        directions = directions.reshape(-1, 3)
         features = torch.cat([
             features,
-            self.direction_encoder(directions)
+            self.direction_encoder(directions[mask])
         ], dim=-1)
 
-        rgb = self.rgb_mlp(features)
-        return torch.cat([rgb, sigma], dim=-1)
+        rgb[mask] = self.rgb_mlp(features)
+        rgbs = torch.cat([rgb, sigma], dim=-1).reshape(out_shape + [-1])
+        return rgbs
+    
+    def update_filter(self):
+        self.filter.update(self)
