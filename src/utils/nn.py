@@ -1,6 +1,5 @@
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
 from .mlhhe import MultiLevelHybridHashEncoding
 from .ogfilter import OccupancyGridFilter
 
@@ -149,9 +148,10 @@ class InstantNGP(nn.Module):
     """InstantNGP implementation using MLHHE from https://github.com/cheind"""
 
     def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
-                 min_res: int = 32, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128, 
+                 min_res: int = 32, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128,
                  f_sigma_init: float = 0.04, f_sigma_threshold: float = 0.01, f_stochastic_test: bool = True,
-                 f_update_decay: float = 0.7, f_update_noise_scale: float = None, f_update_selection_rate: float = 0.25):
+                 f_update_decay: float = 0.7, f_update_noise_scale: float = None,
+                 f_update_selection_rate: float = 0.25):
         """Init
 
         Args:
@@ -198,7 +198,7 @@ class InstantNGP(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_size, 16), # index 0 is log density
+            nn.Linear(hidden_size, 16),  # index 0 is log density
         )
         """MLP processing encoded coordinates, output at index 0 is log of sigma"""
 
@@ -240,7 +240,7 @@ class InstantNGP(nn.Module):
         coordinates = coordinates.reshape(-1, 3)
         sigma = torch.zeros([coordinates.shape[0], 1], dtype=torch.float32, device=device)
         rgb = torch.zeros([coordinates.shape[0], 3], dtype=torch.float32, device=device)
-        
+
         mask = torch.ones(coordinates.shape[0], dtype=bool, device=device)
         if masked:
             mask = self.filter.test(coordinates)
@@ -262,6 +262,6 @@ class InstantNGP(nn.Module):
         rgb[mask] = self.rgb_mlp(features)
         rgbs = torch.cat([rgb, sigma], dim=-1).reshape(out_shape + [-1])
         return rgbs
-    
+
     def update_filter(self):
         self.filter.update(self)

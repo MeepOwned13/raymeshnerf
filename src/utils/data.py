@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
 
-from .rays import create_rays, sobel_filter
+from .rays import create_rays
 from .mesh_render import render_mesh
 
 
@@ -85,7 +85,6 @@ class ImportantPixelSampler(WeightedRandomSampler):
     def __iter__(self):
         self.num_iters += 1
         yield from super(ImportantPixelSampler, self).__iter__()
-
 
     def update_errors(self, idxs: Tensor, errors: Tensor):
         """Update squared errors and weights for given indicies

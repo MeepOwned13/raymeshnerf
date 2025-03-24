@@ -286,8 +286,8 @@ def _compute_resolutions(
     https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf
     """
     growth_factor = torch.exp(
-        (torch.log(torch.tensor(max_res)) - torch.log(torch.tensor(min_res)))
-        / (n_levels - 1)
+        (torch.log(torch.tensor(max_res)) - torch.log(torch.tensor(min_res))) /
+        (n_levels - 1)
     )
     resolutions = (
         torch.floor(
