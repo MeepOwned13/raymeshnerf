@@ -307,7 +307,7 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('high')
 
-    data = NeRFData("tiny_nerf_data", batch_size=2**10, epoch_size=2**18)
+    data = NeRFData("Weisshai_Great_White_Shark", batch_size=2**10, epoch_size=2**18)
     module = LNeRF()
     logger = TensorBoardLogger(".", default_hp_metric=False)
     trainer = L.Trainer(
