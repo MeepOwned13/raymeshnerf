@@ -176,7 +176,7 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
         fov_x=fov_x,
         deterministic=deterministic,
     )
-    
+
     render = np.asarray(mi.render(scene, sensor=sensor), dtype=np.float32).clip(0, 1)
     images = np.asarray(mi.Bitmap(render).convert(srgb_gamma=True, component_format=mi.Struct.Type.Float32))
     images = images.reshape(size, -1, size, 3).transpose(1, 0, 2, 3)

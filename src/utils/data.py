@@ -1,30 +1,37 @@
 import torch
 from torch import Tensor
-from torch.utils.data import WeightedRandomSampler
+from torch.utils.data import WeightedRandomSampler, IterableDataset
 import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
+from collections import deque
+from typing import Generator
 
-from .rays import create_rays
+from .rays import create_rays, sobel_filter
 from .mesh_render import render_mesh
 
 
-def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor, skip_cat: bool = False,
+                     weight_epsilon: float = 0.33) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Creates rays for NeRF training
 
     Args:
         images (shape[N, H, W, 3]): Images to extract colors and sizes from
         c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
         focal (shape[]): Focal length
+        weight_epsilon: Added epsilon for pixel weights
+        skip_cat: Skips concatenation resulting in list of images (length N)
 
     Returns:
         origins (shape[N * H * W, 3]): Ray origins in World coordinates
         directions (shape[N * H * W, 3]): Cartesian ray directions in World
         colors (shape[N * H * W, 3]): RGB colors for rays
+        pixel_weights (shape[N * H * W]): Sampling edge weights for rays
     """
     origins = []
     directions = []
     colors = []
+    pixel_weights = []
 
     # Collecting to list then concat for ease
     for image, c2w in zip(images, c2ws):
@@ -35,16 +42,20 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor) -> tuple[Tenso
         ], dtype=torch.float32)
 
         o, d = create_rays(image.shape[0], image.shape[1], intrinsic, c2w)
+        weights = sobel_filter(image.unsqueeze(0)).squeeze(0) + weight_epsilon
 
         origins.append(o.flatten(0, 1))
         directions.append(d.flatten(0, 1))
         colors.append(image.flatten(0, 1))
+        pixel_weights.append(weights.flatten(0, 1))
 
-    origins = torch.cat(origins, dim=0)
-    directions = torch.cat(directions, dim=0)
-    colors = torch.cat(colors, dim=0)
+    if not skip_cat:
+        origins = torch.cat(origins, dim=0)
+        directions = torch.cat(directions, dim=0)
+        colors = torch.cat(colors, dim=0)
+        pixel_weights = torch.cat(pixel_weights, dim=0)
 
-    return origins, directions, colors
+    return origins, directions, colors, pixel_weights
 
 
 class ImportantPixelSampler(WeightedRandomSampler):
@@ -237,3 +248,61 @@ def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None =
     return load_npz(npz_path)
 
 
+class RayDataset(IterableDataset):
+    def __init__(self, images: Tensor, c2ws: Tensor, focal: Tensor, rays_per_image: int,
+                 swap_strategy_iter: int = 10):
+        """Init
+
+        Args:
+            images (shape[N, H, W, 3]): Images
+            c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
+            focal (shape[]): Focal length
+            rays_per_image: Samples per image
+            swap_strategy_iter: Specifies at which iteration Squared Error sampling takes over fully per image
+        """
+        super(RayDataset, self).__init__()
+        self.rays_per_image = rays_per_image
+        self.current_ray_idxs: deque = deque([])
+        self.current_image_idx: int = None
+
+        origins, directions, colors, pixel_weights = create_nerf_data(images, c2ws, focal, skip_cat=True)
+
+        self.data = [(
+            o, d, c, ImportantPixelSampler(p, self.rays_per_image, swap_strategy_iter=swap_strategy_iter)
+        ) for o, d, c, p in zip(origins, directions, colors, pixel_weights)]
+
+        # TODO: make self.image_weights adapt to pixel sampler weight sums
+        self.image_weights = torch.ones(len(self.data), dtype=torch.float32)
+
+    def __iter__(self) -> Generator[Tensor, Tensor, Tensor, Tensor]:
+        """Iterate dataset
+
+        rays_per_image samples are taken from a single image and yielded 1 by 1, after which a new image is chosen
+
+        Yields:
+            pointer (shape[2]): Pointer to use for update()
+            origins (shape[3]): Ray origin in World coordinates
+            directions (shape[3]): Cartesian ray direction in World
+            colors (shape[3]): RGB colors for ray
+        """
+        while True:
+            if not self.current_ray_idxs:
+                self.current_image_idx = torch.multinomial(self.image_weights, num_samples=1).item()
+                o, d, c, sampler = self.data[self.current_image_idx]
+                self.current_ray_idxs = deque([i for i in sampler])
+
+            idx = self.current_ray_idxs.pop()
+            pointer = torch.tensor([self.current_image_idx, idx], dtype=int)
+            yield pointer, o[idx], d[idx], c[idx]
+
+    def update(self, pointers: Tensor, errors: Tensor):
+        """Update squared errors and weights for with pointers
+
+        Args:
+            pointers (shape[K, 2]): Specifies which samplers and indices to edit weights on
+            errors (shape[K]): Freshly calculated squared errors for the pointers
+        """
+        for v in torch.unique(pointers[:, 0]):
+            sampler: ImportantPixelSampler = self.data[v][3]
+            mask = pointers[:, 0] == v
+            sampler.update_errors(pointers[mask][:, 1], errors[mask])
