@@ -5,14 +5,14 @@ import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
 from collections import deque
-from typing import Generator
+from typing import Iterator
 
 from .rays import create_rays, sobel_filter
 from .mesh_render import render_mesh
 
 
-def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor, skip_cat: bool = False,
-                     weight_epsilon: float = 0.33) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor,
+                     skip_cat: bool = False) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Creates rays for NeRF training
 
     Args:
@@ -42,7 +42,7 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor, skip_cat: bool
         ], dtype=torch.float32)
 
         o, d = create_rays(image.shape[0], image.shape[1], intrinsic, c2w)
-        weights = sobel_filter(image.unsqueeze(0)).squeeze(0) + weight_epsilon
+        weights = sobel_filter(image.unsqueeze(0)).squeeze(0) + 0.1
 
         origins.append(o.flatten(0, 1))
         directions.append(d.flatten(0, 1))
@@ -72,14 +72,17 @@ class ImportantPixelSampler(WeightedRandomSampler):
             swap_strategy_iter: Specifies at which iteration Squared Error sampling takes over fully
             step_epsilon: Increase of weights not being chosen
         """
-        super(ImportantPixelSampler, self).__init__(weights=weights,
-                                                    num_samples=num_samples, replacement=replacement, generator=None)
+        super(ImportantPixelSampler, self).__init__(weights=weights, num_samples=num_samples,
+                                                    replacement=replacement, generator=None)
         weights = weights.to(torch.float32)
         self.pixel_weights: Tensor = weights / weights.max()
         """(shape[N]) Pixel weights assigned by edge detection"""
 
-        self.weights: Tensor = self.pixel_weights
+        self.weights: Tensor = torch.clamp(self.pixel_weights.clone() + 0.4, 0.0, 1.0)
         """(shape[N]) Weights used for choosing the next samples"""
+
+        self.weights_sum: Tensor = self.weights.sum()
+        """(shape[]) Sum of weights"""
 
         self.swap_strategy_iter: int = swap_strategy_iter
         """Specifies at which iteration Squared Error sampling takes over fully"""
@@ -90,7 +93,7 @@ class ImportantPixelSampler(WeightedRandomSampler):
         self.num_iters: int = 0
         """Counts started iterations"""
 
-        self.squared_errors: Tensor = torch.ones(self.pixel_weights.shape, dtype=torch.float32)
+        self.squared_errors: Tensor = torch.ones_like(self.pixel_weights, dtype=torch.float32)
         """(shape[N]) Stores squared errors for pixels"""
 
     def __iter__(self):
@@ -104,12 +107,17 @@ class ImportantPixelSampler(WeightedRandomSampler):
             idxs (shape[K]): Specifies which indicies to edit weights on
             errors (shape[K]): Freshly calculated squared errors for the idxs
         """
-        errors = errors.clone().cpu().detach()
-        # Epsilon evaluates to 5e-3 as the prev value contributes 20%
-        self.squared_errors[idxs] = self.squared_errors[idxs] * 0.2 + errors * 0.8 + 4e-3  # Discounted error update
+        idxs = idxs.cpu().detach()
+        errors = errors.cpu().detach()
+
+        # Epsilon evaluates to 5e-3 as the prev value contributes 40%
+        self.squared_errors[idxs] = self.squared_errors[idxs] * 0.4 + errors * 0.6 + 6e-3  # Discounted error update
         self.weights += self.step_epsilon  # Increase weights of entries not chosen, needed to re-evaluate areas
         pxw = torch.clamp(torch.tensor([1.0], dtype=torch.float32) - self.num_iters / self.swap_strategy_iter, 0.0, 1.0)
         self.weights[idxs] = self.pixel_weights[idxs] * pxw + self.squared_errors[idxs] * (1 - pxw)
+
+        # Incremental implementations were too inaccurate, using this instead
+        self.weights_sum = self.weights.sum()
 
 
 def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical_partitions: int = 2):
@@ -249,8 +257,13 @@ def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None =
 
 
 class RayDataset(IterableDataset):
+    """Dataset that samples rays by image, images and rays inside them are weighted
+
+    WARNING: THE update_errors() FUNCTION WORKS INCORRECTLY IF DATALOADER num_workers ISN'T SET TO 0
+    """
+
     def __init__(self, images: Tensor, c2ws: Tensor, focal: Tensor, rays_per_image: int,
-                 swap_strategy_iter: int = 10):
+                 swap_strategy_iter: int = 5):
         """Init
 
         Args:
@@ -271,10 +284,9 @@ class RayDataset(IterableDataset):
             o, d, c, ImportantPixelSampler(p, self.rays_per_image, swap_strategy_iter=swap_strategy_iter)
         ) for o, d, c, p in zip(origins, directions, colors, pixel_weights)]
 
-        # TODO: make self.image_weights adapt to pixel sampler weight sums
-        self.image_weights = torch.ones(len(self.data), dtype=torch.float32)
+        self.image_weights = torch.tensor([s.weights_sum for _, _, _, s in self.data], dtype=torch.float32)
 
-    def __iter__(self) -> Generator[Tensor, Tensor, Tensor, Tensor]:
+    def __iter__(self) -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor]]:
         """Iterate dataset
 
         rays_per_image samples are taken from a single image and yielded 1 by 1, after which a new image is chosen
@@ -295,7 +307,7 @@ class RayDataset(IterableDataset):
             pointer = torch.tensor([self.current_image_idx, idx], dtype=int)
             yield pointer, o[idx], d[idx], c[idx]
 
-    def update(self, pointers: Tensor, errors: Tensor):
+    def update_errors(self, pointers: Tensor, errors: Tensor):
         """Update squared errors and weights for with pointers
 
         Args:
@@ -303,6 +315,7 @@ class RayDataset(IterableDataset):
             errors (shape[K]): Freshly calculated squared errors for the pointers
         """
         for v in torch.unique(pointers[:, 0]):
-            sampler: ImportantPixelSampler = self.data[v][3]
             mask = pointers[:, 0] == v
+            sampler: ImportantPixelSampler = self.data[v][3]
             sampler.update_errors(pointers[mask][:, 1], errors[mask])
+            self.image_weights[v] = sampler.weights_sum
