@@ -61,24 +61,20 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor,
 class ImportantPixelSampler(WeightedRandomSampler):
     """Sampler implementing Important Pixels Sampling for NeRF"""
 
-    def __init__(self, weights: Tensor, num_samples: int, replacement: bool = True, swap_strategy_iter: int = 100,
-                 step_epsilon: float = 1e-4):
+    def __init__(self, weights: Tensor, num_samples: int, swap_strategy_iter: int = 100,
+                 step_epsilon: Tensor = 1e-6):
         """Init
 
         Args:
             weights (shape[N]): Pixel weights assigned by edge detection
             num_samples: Number of samples to draw per __iter__ (epoch)
-            replacement: Choose /w replacement?
             swap_strategy_iter: Specifies at which iteration Squared Error sampling takes over fully
-            step_epsilon: Increase of weights not being chosen
         """
         super(ImportantPixelSampler, self).__init__(weights=weights, num_samples=num_samples,
-                                                    replacement=replacement, generator=None)
+                                                    replacement=False, generator=None)
         weights = weights.to(torch.float32)
-        self.pixel_weights: Tensor = weights / weights.max()
-        """(shape[N]) Pixel weights assigned by edge detection"""
 
-        self.weights: Tensor = torch.clamp(self.pixel_weights.clone() + 0.4, 0.0, 1.0)
+        self.weights: Tensor = torch.clamp(weights / weights.max() + 1e-2, 0.0, 1.0)
         """(shape[N]) Weights used for choosing the next samples"""
 
         self.weights_sum: Tensor = self.weights.sum()
@@ -87,14 +83,11 @@ class ImportantPixelSampler(WeightedRandomSampler):
         self.swap_strategy_iter: int = swap_strategy_iter
         """Specifies at which iteration Squared Error sampling takes over fully"""
 
-        self.step_epsilon: float = step_epsilon
-        """Increase of weights not being chosen"""
-
         self.num_iters: int = 0
         """Counts started iterations"""
 
-        self.squared_errors: Tensor = torch.ones_like(self.pixel_weights, dtype=torch.float32)
-        """(shape[N]) Stores squared errors for pixels"""
+        self.step_epsilon: torch.Tensor = step_epsilon
+        """Added weight for all weights other than chosen ones"""
 
     def __iter__(self):
         self.num_iters += 1
@@ -107,17 +100,19 @@ class ImportantPixelSampler(WeightedRandomSampler):
             idxs (shape[K]): Specifies which indicies to edit weights on
             errors (shape[K]): Freshly calculated squared errors for the idxs
         """
+        if self.num_iters <= self.swap_strategy_iter:
+            return
+        
         idxs = idxs.cpu().detach()
         errors = errors.cpu().detach()
 
-        # Epsilon evaluates to 5e-3 as the prev value contributes 40%
-        self.squared_errors[idxs] = self.squared_errors[idxs] * 0.4 + errors * 0.6 + 6e-3  # Discounted error update
-        self.weights += self.step_epsilon  # Increase weights of entries not chosen, needed to re-evaluate areas
-        pxw = torch.clamp(torch.tensor([1.0], dtype=torch.float32) - self.num_iters / self.swap_strategy_iter, 0.0, 1.0)
-        self.weights[idxs] = self.pixel_weights[idxs] * pxw + self.squared_errors[idxs] * (1 - pxw)
+        old_weights_sum = self.weights[idxs].sum()
+        self.weights += self.step_epsilon
+        self.weights[idxs] = errors + 5e-4
 
-        # Incremental implementations were too inaccurate, using this instead
-        self.weights_sum = self.weights.sum()
+        self.weights_sum += self.weights[idxs].sum() + \
+            self.step_epsilon * (self.weights.shape[0] - idxs.shape[0]) - old_weights_sum
+        self.weights_sum = torch.clamp(self.weights_sum, 1, None)
 
 
 def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical_partitions: int = 2):
@@ -281,7 +276,8 @@ class RayDataset(IterableDataset):
         origins, directions, colors, pixel_weights = create_nerf_data(images, c2ws, focal, skip_cat=True)
 
         self.data = [(
-            o, d, c, ImportantPixelSampler(p, self.rays_per_image, swap_strategy_iter=swap_strategy_iter)
+            o, d, c, ImportantPixelSampler(p, self.rays_per_image, swap_strategy_iter=swap_strategy_iter,
+                                           step_epsilon=self.rays_per_image / o.shape[0] * 3e-5)
         ) for o, d, c, p in zip(origins, directions, colors, pixel_weights)]
 
         self.image_weights = torch.tensor([s.weights_sum for _, _, _, s in self.data], dtype=torch.float32)

@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from torch.nn import MSELoss
+from torch.nn import MSELoss, SmoothL1Loss
 from torchvision.utils import make_grid
 from torch.utils.data import TensorDataset, DataLoader
 from torchmetrics.image import PeakSignalNoiseRatio
@@ -14,7 +14,7 @@ import utils as U
 
 class NeRFData(L.LightningDataModule):
     def __init__(self, object_name: str, batch_size: int = 1024, horizontal_val_angles: int = 4,
-                 vertical_val_angles: int = 3, swap_strategy_iter: int = 20, epoch_size: int = 2**20):
+                 vertical_val_angles: int = 3, swap_strategy_iter: int = 5, epoch_size: int = 2**20):
         """Init
 
         Args:
@@ -82,8 +82,8 @@ class NeRFData(L.LightningDataModule):
 
 
 class LNeRF(L.LightningModule):
-    def __init__(self, hidden_size: int = 64, encoding_log2: int = 18, embed_dims: int = 2, levels: int = 16,
-                 min_res: int = 16, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128,
+    def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
+                 min_res: int = 16, max_res: int = 2048, max_res_dense: int = 256, f_res: int = 128,
                  f_sigma_init: float = 0.04, f_sigma_threshold: float = 0.01, f_stochastic_test: bool = True,
                  f_update_decay: float = 0.7, f_update_noise_scale: float = None, f_update_selection_rate: float = 0.25,
                  coarse_samples: int = 64, fine_samples: int = 128, **kwargs):
@@ -126,7 +126,7 @@ class LNeRF(L.LightningModule):
             f_update_selection_rate=self.hparams.f_update_selection_rate,
         )
 
-        self.mse = MSELoss(reduction='none')
+        self.lossf = SmoothL1Loss(reduction='none')
         self.psnr = PeakSignalNoiseRatio()
 
     def compute_along_rays(self, origins: Tensor, directions: Tensor, near: float | None = None,
@@ -238,7 +238,7 @@ class LNeRF(L.LightningModule):
 
         coarse_colors, _ = U.rays.render_rays(rgbs=coarse_rgbs, depths=coarse_depths)
         fine_colors, _ = U.rays.render_rays(rgbs=fine_rgbs, depths=fine_depths)
-        loss = torch.mean(self.mse(coarse_colors, colors) + self.mse(fine_colors, colors), dim=-1)
+        loss = torch.mean(self.lossf(coarse_colors, colors) + self.lossf(fine_colors, colors), dim=-1)
         self.trainer.train_dataloader.dataset.update_errors(pointers, loss)
         loss = loss.mean()
 
@@ -251,7 +251,7 @@ class LNeRF(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         c2w, focal, image = batch
         render = self.render_image(image.shape[1], image.shape[2], c2w[0], focal[0]).unsqueeze(0)
-        loss = self.mse(render, image).mean()
+        loss = self.lossf(render, image).mean()
 
         render, image = render.permute(0, 3, 1, 2), image.permute(0, 3, 1, 2)
         psnr = self.psnr(render, image)
@@ -266,7 +266,6 @@ class LNeRF(L.LightningModule):
         if self.trainer and not self.trainer.sanity_checking:  # Disable image logging on sanity check
             images = torch.cat(self.val_imgs, dim=0)
             self.logger.experiment.add_image("Renders", make_grid(images, nrow=4, padding=5), self.global_step)
-            
         self.val_imgs.clear()
 
     def configure_optimizers(self):
@@ -280,7 +279,7 @@ class LNeRF(L.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    optimizer, min_lr=1e-4, factor=0.7, patience=0, mode="max"
+                    optimizer, min_lr=1e-4, factor=0.75, patience=1, mode="max"
                 ),
                 "interval": "step",
                 "frequency": self.trainer.val_check_interval,
@@ -306,9 +305,9 @@ if __name__ == '__main__':
     warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
 
     if torch.cuda.is_available():
-        torch.set_float32_matmul_precision('high')
+        torch.set_float32_matmul_precision('medium')
 
-    data = NeRFData("tiny_nerf_data", batch_size=2**10, epoch_size=2**20)
+    data = NeRFData("Weisshai_Great_White_Shark", batch_size=2**12, epoch_size=2**20)
     module = LNeRF()
     logger = TensorBoardLogger(".", default_hp_metric=False)
 
@@ -318,6 +317,7 @@ if __name__ == '__main__':
         check_val_every_n_epoch=None, val_check_interval=batches_in_epoch,
         log_every_n_steps=1, logger=logger,
         accumulate_grad_batches=2**13 // data.hparams.batch_size,
+        gradient_clip_algorithm="norm", gradient_clip_val=1,
         callbacks=[
             OGFilterCallback(2**16 // 2**13),
             LearningRateMonitor(logging_interval="step"),

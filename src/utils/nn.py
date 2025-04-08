@@ -144,6 +144,70 @@ class NeRF(nn.Module):
         return torch.cat([rgb, sigma], dim=-1)
 
 
+class SphericalHarmonicsBasisEncoding(nn.Module):
+    """Cartesian Coordinates to Spherical Harmonics Basis Encoding Module"""
+
+    def __init__(self, degree: int = 3):
+        """Init
+
+        Args:
+            degree: Degree of basis to encode to (0-3)
+        """
+        super(SphericalHarmonicsBasisEncoding, self).__init__()
+        self.SIZES = (1, 4, 9, 16)
+        """Possible last dim length of outputs ordered by degree"""
+
+        assert degree in (0, 1, 2, 3)  # degree can be 0, 1, 2 or 3
+        self.degree = degree
+        """Degree of basis"""
+
+    def forward(self, input: Tensor):
+        """Perform Spherical Harmonics Basis Encoding
+
+        Args:
+            input (shape[..., 3]): Cartesian Coordinates to encode
+
+        Returns:
+            encoded (shape[..., SIZES[degree]]): Encoded tensor
+        """
+        encoded = torch.zeros((input.shape[:-1]) + (self.out_dim,), dtype=torch.float32, device=input.device)
+
+        pi = torch.tensor([torch.pi], dtype=torch.float32, device=input.device)
+        x, y, z = input[..., 0], input[..., 1], input[..., 2]
+        r = torch.sqrt(x**2 + y**2 + z**2)
+
+        if self.degree >= 0:
+            encoded[..., 0] = 0.5 * torch.sqrt(1 / pi)
+
+        if self.degree >= 1:
+            encoded[..., 1] = torch.sqrt(3 / (4 * pi)) * y / r
+            encoded[..., 2] = torch.sqrt(3 / (4 * pi)) * z / r
+            encoded[..., 3] = torch.sqrt(3 / (4 * pi)) * x / r
+
+        if self.degree >= 2:
+            encoded[..., 4] = 1 / 2 * torch.sqrt(15 / pi) * (x * y) / r**2
+            encoded[..., 5] = 1 / 2 * torch.sqrt(15 / pi) * (y * z) / r**2
+            encoded[..., 6] = 1 / 4 * torch.sqrt(5 / pi) * (3 * z**2 - r**2) / r**2
+            encoded[..., 7] = 1 / 2 * torch.sqrt(15 / pi) * (x * z) / r**2
+            encoded[..., 8] = 1 / 2 * torch.sqrt(15 / pi) * (x**2 - y**2) / r**2
+
+        if self.degree >= 3:
+            encoded[..., 9] = 1 / 4 * torch.sqrt(35 / (2 * pi)) * y * (3 * x**2 - y**2) / r**3
+            encoded[..., 10] = 1 / 2 * torch.sqrt(105 / pi) * (x * y * z) / r**3
+            encoded[..., 11] = 1 / 4 * torch.sqrt(21 / (2 * pi)) * y * (5 * z**2 - r**2) / r**3
+            encoded[..., 12] = 1 / 4 * torch.sqrt(7 / pi) * z * (5 * z**2 - 3 * r**2) / r**3
+            encoded[..., 13] = 1 / 4 * torch.sqrt(21 / (2 * pi)) * x * (5 * z**2 - r**2) / r**3
+            encoded[..., 14] = 1 / 4 * torch.sqrt(105 / pi) * z * (x**2 - y**2) / r**3
+            encoded[..., 15] = 1 / 4 * torch.sqrt(35 / (2 * pi)) * x * (x**2 - 3 * y**2) / r**3
+
+        return encoded
+
+    @property
+    def out_dim(self):
+        """Length of last dimension of output"""
+        return self.SIZES[self.degree]
+
+
 class InstantNGP(nn.Module):
     """InstantNGP implementation using MLHHE from https://github.com/cheind"""
 
@@ -204,11 +268,11 @@ class InstantNGP(nn.Module):
 
         nn.init.constant_(self.feature_mlp[-1].bias[:1], -1.0)
 
-        self.direction_encoder = PositionalEncoding(2)  # TODO: Swap to spherical basis encoding
+        self.direction_encoder = SphericalHarmonicsBasisEncoding(3)
         """Encoder for direction vectors"""
 
         self.rgb_mlp = nn.Sequential(
-            nn.Linear(16 + 15, hidden_size),  # TODO: 15 should be 16 after spherical basis is implemented
+            nn.Linear(16 + 16, hidden_size),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(inplace=True),
