@@ -243,8 +243,8 @@ class LNeRF(L.LightningModule):
             noise = torch.empty_like(colors).uniform_(0.0, 1.0)
 
             mixed_colors = colors * alpha + noise * (1 - alpha)
-            mixed_coarse_colors = colors * coarse_alphas + noise * (1 - coarse_alphas)
-            mixed_fine_colors = colors * fine_alphas + noise * (1 - fine_alphas)
+            mixed_coarse_colors = coarse_colors * coarse_alphas + noise * (1 - coarse_alphas)
+            mixed_fine_colors = fine_colors * fine_alphas + noise * (1 - fine_alphas)
 
             loss = (
                 self.lossf(mixed_coarse_colors, mixed_colors) + self.lossf(mixed_fine_colors, mixed_colors)
