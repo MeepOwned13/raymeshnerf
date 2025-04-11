@@ -226,8 +226,8 @@ class LNeRF(L.LightningModule):
         image = []
         for o, d in data:
             _, _, rgbs, depths = self.compute_along_rays(o, d, near, far)
-            rgb, _, _ = U.rays.render_rays(rgbs, depths)
-            image.append(rgb)
+            rgb, _, alpha = U.rays.render_rays(rgbs, depths)
+            image.append(torch.cat((rgb, alpha), dim=-1))
 
         return torch.cat(image, 0).reshape(height, width, -1)
 
@@ -239,10 +239,10 @@ class LNeRF(L.LightningModule):
         fine_colors, _, fine_alphas = U.rays.render_rays(rgbs=fine_rgbs, depths=fine_depths)
         
         if colors.shape[-1] == 4:  # RGBA, apply background noise to ensure 0 density background
-            colors, alpha = colors[..., :3], colors[..., 3:4]
+            colors, alphas = colors[..., :3], colors[..., 3:4]
             noise = torch.empty_like(colors).uniform_(0.0, 1.0)
 
-            mixed_colors = colors * alpha + noise * (1 - alpha)
+            mixed_colors = colors * alphas + noise * (1 - alphas)
             mixed_coarse_colors = coarse_colors * coarse_alphas + noise * (1 - coarse_alphas)
             mixed_fine_colors = fine_colors * fine_alphas + noise * (1 - fine_alphas)
 
@@ -262,7 +262,6 @@ class LNeRF(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         c2w, focal, image = batch
-        image = image[..., :3]  # Limit RGBA to RGB
         render = self.render_image(image.shape[1], image.shape[2], c2w[0], focal[0]).unsqueeze(0)
         loss = self.lossf(render, image).mean()
 
@@ -319,7 +318,7 @@ class PixelSamplerUpdateCallback(Callback):
             trainer.datamodule.train_rays.update_weights()
 
             weights = [trainer.datamodule.train_rays.data[i][3].weights for i in list(range(8))]
-            weights = torch.stack(weights, dim=0).reshape(-1, 1, 200, 200).expand(-1, 3, -1, -1)
+            weights = torch.stack(weights, dim=0).unsqueeze(1).expand(-1, 3, -1, -1)
             trainer.logger.experiment.add_image("Sample weights", make_grid(weights, nrow=4, padding=5), trainer.global_step)
         return super().on_validation_epoch_end(trainer, pl_module)
 
@@ -334,9 +333,9 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('high')
 
-    accumulation = 2**14
-    data = NeRFData("Shurtape_Tape_Purple_CP28", batch_size=2**12, epoch_size=2**21, rays_per_image=2**14)
-    module = LNeRF(encoding_log2=14, max_res=512, levels=8, hidden_size=64)
+    accumulation = 2**18
+    data = NeRFData("Shurtape_Tape_Purple_CP28", batch_size=2**12, epoch_size=2**21, rays_per_image=2**13)
+    module = LNeRF(encoding_log2=18, max_res=2048, levels=8, hidden_size=32)
     logger = TensorBoardLogger(".", default_hp_metric=False)
 
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
