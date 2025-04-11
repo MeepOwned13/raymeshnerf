@@ -260,8 +260,6 @@ class InstantNGP(nn.Module):
         self.feature_mlp = nn.Sequential(
             nn.Linear(levels * embed_dims, hidden_size),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(inplace=True),
             nn.Linear(hidden_size, 16),  # index 0 is log density
         )
         """MLP processing encoded coordinates, output at index 0 is log of sigma"""
@@ -273,8 +271,6 @@ class InstantNGP(nn.Module):
 
         self.rgb_mlp = nn.Sequential(
             nn.Linear(16 + 16, hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_size, hidden_size),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(inplace=True),

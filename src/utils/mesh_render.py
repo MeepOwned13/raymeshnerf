@@ -113,7 +113,7 @@ def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 4
             'type': 'hdrfilm',
             'width': size * len(sensors),
             'height': size,
-            'pixel_format': 'rgb',
+            'pixel_format': 'rgba',
             'filter': {
                 'type': 'tent'
             }
@@ -124,7 +124,7 @@ def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 4
     return mi.load_dict(batch_sensor), extrinsics, focal.astype(np.float32)
 
 
-def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: int = 400, fov_x: float = 40,
+def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: int = 200, fov_x: float = 40,
                 deterministic=False) -> tuple[np.ndarray, np.ndarray, float]:
     """Renders mesh specified by path from multiple angles
 
@@ -179,7 +179,7 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
 
     render = np.asarray(mi.render(scene, sensor=sensor), dtype=np.float32).clip(0, 1)
     images = np.asarray(mi.Bitmap(render).convert(srgb_gamma=True, component_format=mi.Struct.Type.Float32))
-    images = images.reshape(size, -1, size, 3).transpose(1, 0, 2, 3)
+    images = images.reshape(size, sensor_count, size, -1).transpose(1, 0, 2, 3)
 
     return images, extrinsics, focal
 

@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from torch.utils.data import WeightedRandomSampler, IterableDataset
+from torch.utils.data import WeightedRandomSampler, IterableDataset, RandomSampler
 import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
@@ -16,7 +16,7 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor,
     """Creates rays for NeRF training
 
     Args:
-        images (shape[N, H, W, 3]): Images to extract colors and sizes from
+        images (shape[N, H, W, 3-4]): Images to extract colors and sizes from
         c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
         focal (shape[]): Focal length
         weight_epsilon: Added epsilon for pixel weights
@@ -25,7 +25,7 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor,
     Returns:
         origins (shape[N * H * W, 3]): Ray origins in World coordinates
         directions (shape[N * H * W, 3]): Cartesian ray directions in World
-        colors (shape[N * H * W, 3]): RGB colors for rays
+        colors (shape[N * H * W, 3-4]): RGB(A) colors for rays
         pixel_weights (shape[N * H * W]): Sampling edge weights for rays
     """
     origins = []
@@ -61,8 +61,7 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor,
 class ImportantPixelSampler(WeightedRandomSampler):
     """Sampler implementing Important Pixels Sampling for NeRF"""
 
-    def __init__(self, weights: Tensor, num_samples: int, swap_strategy_iter: int = 100,
-                 step_epsilon: Tensor = 1e-6):
+    def __init__(self, weights: Tensor, num_samples: int):
         """Init
 
         Args:
@@ -73,46 +72,32 @@ class ImportantPixelSampler(WeightedRandomSampler):
         super(ImportantPixelSampler, self).__init__(weights=weights, num_samples=num_samples,
                                                     replacement=False, generator=None)
         weights = weights.to(torch.float32)
-
         self.weights: Tensor = torch.clamp(weights / weights.max() + 1e-2, 0.0, 1.0)
         """(shape[N]) Weights used for choosing the next samples"""
 
-        self.weights_sum: Tensor = self.weights.sum()
-        """(shape[]) Sum of weights"""
-
-        self.swap_strategy_iter: int = swap_strategy_iter
-        """Specifies at which iteration Squared Error sampling takes over fully"""
-
-        self.num_iters: int = 0
-        """Counts started iterations"""
-
-        self.step_epsilon: torch.Tensor = step_epsilon
-        """Added weight for all weights other than chosen ones"""
+        self.errors: Tensor = torch.ones_like(self.weights) * 0.1
+        """(shape[N]) Stores squared errors for pixels"""
 
     def __iter__(self):
-        self.num_iters += 1
         yield from super(ImportantPixelSampler, self).__iter__()
 
     def update_errors(self, idxs: Tensor, errors: Tensor):
-        """Update squared errors and weights for given indicies
+        """Updates errors for given indices
 
         Args:
             idxs (shape[K]): Specifies which indicies to edit weights on
             errors (shape[K]): Freshly calculated squared errors for the idxs
-        """
-        if self.num_iters <= self.swap_strategy_iter:
-            return
-        
+        """        
         idxs = idxs.cpu().detach()
         errors = errors.cpu().detach()
+        self.errors[idxs] = errors
 
-        old_weights_sum = self.weights[idxs].sum()
-        self.weights += self.step_epsilon
-        self.weights[idxs] = errors + 5e-4
 
-        self.weights_sum += self.weights[idxs].sum() + \
-            self.step_epsilon * (self.weights.shape[0] - idxs.shape[0]) - old_weights_sum
-        self.weights_sum = torch.clamp(self.weights_sum, 1, None)
+    def update_weights(self):
+        """Applies errors to weights with normalization"""
+        self.weights = self.errors.clone() / self.errors.max()
+        # Reset errors
+        self.errors: Tensor = torch.ones_like(self.weights) * self.weights.mean()
 
 
 def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical_partitions: int = 2):
@@ -252,13 +237,9 @@ def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None =
 
 
 class RayDataset(IterableDataset):
-    """Dataset that samples rays by image, images and rays inside them are weighted
+    """Dataset that samples rays by image, images and rays inside them are weighted"""
 
-    WARNING: THE update_errors() FUNCTION WORKS INCORRECTLY IF DATALOADER num_workers ISN'T SET TO 0
-    """
-
-    def __init__(self, images: Tensor, c2ws: Tensor, focal: Tensor, rays_per_image: int,
-                 swap_strategy_iter: int = 5):
+    def __init__(self, images: Tensor, c2ws: Tensor, focal: Tensor, rays_per_image: int, length: int):
         """Init
 
         Args:
@@ -266,29 +247,31 @@ class RayDataset(IterableDataset):
             c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
             focal (shape[]): Focal length
             rays_per_image: Samples per image
-            swap_strategy_iter: Specifies at which iteration Squared Error sampling takes over fully per image
+            length: Length Ligthning will use for epochs
         """
         super(RayDataset, self).__init__()
         self.rays_per_image = rays_per_image
         self.current_ray_idxs: deque = deque([])
         self.current_image_idx: int = None
+        self._length = length
 
         origins, directions, colors, pixel_weights = create_nerf_data(images, c2ws, focal, skip_cat=True)
 
         self.data = [(
-            o, d, c, ImportantPixelSampler(p, self.rays_per_image, swap_strategy_iter=swap_strategy_iter,
-                                           step_epsilon=self.rays_per_image / o.shape[0] * 3e-5)
+            o, d, c, ImportantPixelSampler(p, num_samples=self.rays_per_image)
         ) for o, d, c, p in zip(origins, directions, colors, pixel_weights)]
 
-        self.image_weights = torch.tensor([s.weights_sum for _, _, _, s in self.data], dtype=torch.float32)
+        self.image_weights = torch.tensor([d[3].weights.sum() for d in self.data])
 
-    def __iter__(self) -> Iterator[tuple[Tensor, Tensor, Tensor, Tensor]]:
+    def __len__(self):
+        return self._length
+
+    def __iter__(self) -> Iterator[tuple[Tensor, Tensor, Tensor]]:
         """Iterate dataset
 
         rays_per_image samples are taken from a single image and yielded 1 by 1, after which a new image is chosen
 
         Yields:
-            pointer (shape[2]): Pointer to use for update()
             origins (shape[3]): Ray origin in World coordinates
             directions (shape[3]): Cartesian ray direction in World
             colors (shape[3]): RGB colors for ray
@@ -304,7 +287,7 @@ class RayDataset(IterableDataset):
             yield pointer, o[idx], d[idx], c[idx]
 
     def update_errors(self, pointers: Tensor, errors: Tensor):
-        """Update squared errors and weights for with pointers
+        """Update errors with pointers
 
         Args:
             pointers (shape[K, 2]): Specifies which samplers and indices to edit weights on
@@ -314,4 +297,10 @@ class RayDataset(IterableDataset):
             mask = pointers[:, 0] == v
             sampler: ImportantPixelSampler = self.data[v][3]
             sampler.update_errors(pointers[mask][:, 1], errors[mask])
-            self.image_weights[v] = sampler.weights_sum
+
+    def update_weights(self):
+        """Update sampler weights"""
+        for i in range(len(self.data)):
+            sampler = self.data[i][3]
+            sampler.update_weights()
+            self.image_weights[i] = sampler.weights.sum()
