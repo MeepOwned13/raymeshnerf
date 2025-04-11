@@ -41,7 +41,7 @@ def create_nerf_data(image: Tensor, c2w: Tensor, focal: Tensor) -> tuple[Tensor,
 class ImportantPixelSampler():
     """Sampler implementing Important Pixels Sampling for NeRF"""
 
-    def __init__(self, weights: Tensor, num_samples: int):
+    def __init__(self, weights: Tensor, num_samples: int, error_kernel_size: int = 5):
         """Init
 
         Args:
@@ -53,8 +53,17 @@ class ImportantPixelSampler():
         self.weights: Tensor = torch.clamp(weights / weights.max() + 1e-2, 0.0, 1.0)
         """(shape[H, W]) Weights used for choosing the next samples"""
 
-        self.errors: Tensor = torch.ones_like(self.weights) * 0.1
+        self.errors: Tensor = torch.ones_like(self.weights) * 0.2
         """(shape[H, W]) Stores squared errors for pixels"""
+
+        sigma = 3.5
+        x = torch.arange(error_kernel_size, dtype=torch.float32) - error_kernel_size//2
+        y = torch.arange(error_kernel_size, dtype=torch.float32) - error_kernel_size//2
+        y, x = torch.meshgrid(y, x, indexing='ij')
+        # Compute 2D Gaussian
+        kernel = torch.exp(-(x**2 + y**2) / (2 * sigma**2))
+        kernel = kernel / kernel.sum()  # Normalize to sum to 1
+        self.kernel = kernel.unsqueeze(0).unsqueeze(0)
 
     def __iter__(self):
         rand_tensor = torch.multinomial(
@@ -78,9 +87,10 @@ class ImportantPixelSampler():
 
     def update_weights(self):
         """Applies errors to weights with normalization"""
-        self.weights = self.errors.clone() / self.errors.max()
-        # Reset errors
-        self.errors: Tensor = torch.ones_like(self.weights) * self.weights.mean()
+        errors = self.errors.unsqueeze(0).unsqueeze(0)
+        blurred_errors = F.conv2d(errors, self.kernel, padding=self.kernel.shape[-1] // 2)
+        blurred_errors = blurred_errors.squeeze(0).squeeze(0)
+        self.weights = blurred_errors / blurred_errors.max()
 
 
 def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical_partitions: int = 2):
@@ -222,7 +232,8 @@ def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None =
 class RayDataset(IterableDataset):
     """Dataset that samples rays by image, images and rays inside them are weighted"""
 
-    def __init__(self, images: Tensor, c2ws: Tensor, focal: Tensor, rays_per_image: int, length: int):
+    def __init__(self, images: Tensor, c2ws: Tensor, focal: Tensor, rays_per_image: int, length: int,
+                 subpixel_sampling: bool = False):
         """Init
 
         Args:
@@ -235,6 +246,7 @@ class RayDataset(IterableDataset):
         super(RayDataset, self).__init__()
         self.rays_per_image = rays_per_image
         self._length = length
+        self.subpixel_sampling = subpixel_sampling
 
         self.data = []
         for image, c2w in zip(images, c2ws):
@@ -266,7 +278,7 @@ class RayDataset(IterableDataset):
         """
         ray_idxs = deque([])
         image_idx = None
-        while True:
+        for i in range(self._length):
             if not ray_idxs:
                 image_idx = torch.multinomial(self.image_weights, num_samples=1).item()
                 origins, directions, colors, sampler, diffs = self.data[image_idx]
@@ -275,11 +287,16 @@ class RayDataset(IterableDataset):
             idx = ray_idxs.pop()
             pointer = torch.tensor([image_idx] + idx, dtype=int)
 
-            # Calculate subpixel direction
-            subpixel_direction = F.normalize(
-                directions[*idx] + (torch.rand([2, 1], dtype=torch.float32) * diffs).sum(0), "fro", -1
-            )
-            yield pointer, origins[*idx], subpixel_direction, colors[*idx]
+            direction = directions[*idx]
+            if self.subpixel_sampling:
+                # Calculate subpixel direction
+                direction = F.normalize(
+                    directions + (torch.rand([2, 1], dtype=torch.float32) * diffs).sum(0), "fro", -1
+                )
+
+            yield pointer, origins[*idx], direction, colors[*idx]
+
+        raise StopIteration()
 
     def update_errors(self, pointers: Tensor, errors: Tensor):
         """Update errors with pointers

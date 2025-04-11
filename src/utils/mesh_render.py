@@ -147,8 +147,16 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
         'type': 'scene',
         'integrator': {'type': 'path', 'max_depth': 4},
         'obj': mesh,
+        'light': {
+            'type': 'constant',
+            'radiance': {
+                'type': 'rgb',
+                'value': 1.0,
+            }
+        },
     }
 
+    """
     # Multiple directional lights to ensure black background
     for i, pos in enumerate([
         [0.0, 1.0, 0.0],
@@ -166,6 +174,7 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
                 'value': 1,
             }
         }
+    """
 
     scene: mi.Scene = mi.load_dict(scene_dict)
 

@@ -14,7 +14,8 @@ import utils as U
 
 class NeRFData(L.LightningDataModule):
     def __init__(self, object_name: str, batch_size: int = 1024, horizontal_val_angles: int = 4,
-                 vertical_val_angles: int = 3, epoch_size: int = 2**20, rays_per_image: int = 2**12):
+                 vertical_val_angles: int = 3, epoch_size: int = 2**20, rays_per_image: int = 2**12,
+                 subpixel_sampling: bool = False):
         """Init
 
         Args:
@@ -53,6 +54,7 @@ class NeRFData(L.LightningDataModule):
                 focal=torch.tensor(self.hparams.focal, dtype=torch.float32),
                 rays_per_image=self.hparams.rays_per_image,
                 length=self.hparams.epoch_size,
+                subpixel_sampling=self.hparams.subpixel_sampling,
             )
             """Dataset: (pointers, origins, directions, colors)"""
 
@@ -68,7 +70,9 @@ class NeRFData(L.LightningDataModule):
             dataset=self.train_rays,
             batch_size=self.hparams.batch_size,
             shuffle=False,
-            num_workers=1,
+            num_workers=4,
+            prefetch_factor=4,
+            persistent_workers=True,
         )
 
     def val_dataloader(self):
@@ -77,6 +81,7 @@ class NeRFData(L.LightningDataModule):
             batch_size=1,
             shuffle=False,
             num_workers=2,
+            persistent_workers=True,
         )
 
 
@@ -263,10 +268,10 @@ class LNeRF(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         c2w, focal, image = batch
         render = self.render_image(image.shape[1], image.shape[2], c2w[0], focal[0]).unsqueeze(0)
-        loss = self.lossf(render, image).mean()
+        loss = self.lossf(render[..., :3], image[..., :3]).mean()
 
         render, image = render.permute(0, 3, 1, 2), image.permute(0, 3, 1, 2)
-        psnr = self.psnr(render, image)
+        psnr = self.psnr(render[:, :3, ...], image[:, :3, ...])
 
         metrics = {"val_loss": loss, "val_psnr": psnr}
         self.log_dict(metrics, prog_bar=True, on_epoch=True, on_step=False)
@@ -324,18 +329,20 @@ class PixelSamplerUpdateCallback(Callback):
 
 
 if __name__ == '__main__':
+    """
     # Remove warning for train dataloader having num_workers=1
     warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
     warnings.filterwarnings("ignore", ".*Consider setting `persistent_workers*")
     # Remove warning for iterabledataset __len__
     warnings.filterwarnings("ignore", ".*Your `IterableDataset` has `__len__` defined.*")
+    """
 
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('high')
 
-    accumulation = 2**18
-    data = NeRFData("Shurtape_Tape_Purple_CP28", batch_size=2**12, epoch_size=2**21, rays_per_image=2**13)
-    module = LNeRF(encoding_log2=18, max_res=2048, levels=8, hidden_size=32)
+    accumulation = 2**16
+    data = NeRFData("tiny_nerf_data", batch_size=2**12, epoch_size=2**20, rays_per_image=2**12)
+    module = LNeRF(encoding_log2=19, max_res=2048, levels=16, hidden_size=64)
     logger = TensorBoardLogger(".", default_hp_metric=False)
 
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
@@ -344,18 +351,13 @@ if __name__ == '__main__':
         log_every_n_steps=1, logger=logger, reload_dataloaders_every_n_epochs=1,
         accumulate_grad_batches=accumulation // data.hparams.batch_size if data.hparams.batch_size < accumulation else 1,
         callbacks=[
+            OGFilterCallback(2**22 // accumulation),
             PixelSamplerUpdateCallback(),
             LearningRateMonitor(logging_interval="step"),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1),
             ModelCheckpoint(filename="best_train_loss_{step}", monitor="train_loss", mode="min"),
             ModelCheckpoint(filename="{epoch}", every_n_epochs=1),
-        ]
+        ],
     )
-
-    """TODO: 2025.04.11.
-    - subpixel sampling by modulating direction (e.g. torch.randn * pixel size/2 in world coords)
-    - perhaps custom mlhhe implementation for better understanding, smaller overhead
-    - consider pixel sampling weight matrix as NxM, and do some form of blur (e.g. Gaussian) instead of setting to mean
-    """
 
     trainer.fit(model=module, datamodule=data)
