@@ -55,7 +55,6 @@ if __name__ == '__main__':
         gradient_clip_val=1.75, gradient_clip_algorithm="norm",
         callbacks=[
             LU.PixelSamplerUpdateCallback(),
-            LearningRateMonitor(logging_interval="step"),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1),
             ModelCheckpoint(filename="best_train_loss_{step}", monitor="train_loss", mode="min"),
             ModelCheckpoint(filename="{epoch}", every_n_epochs=1),
