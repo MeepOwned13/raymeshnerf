@@ -5,11 +5,24 @@ from torchvision.utils import make_grid
 from torch.utils.data import TensorDataset, DataLoader
 from torchmetrics.image import PeakSignalNoiseRatio
 import lightning as L
-from lightning.pytorch.loggers import TensorBoardLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
-import warnings
+from lightning.pytorch.callbacks import Callback
+import random
+import numpy as np
 
-import utils as U
+from . import data, rays
+
+
+def w_init_fn(worker_id):
+    # Get current random seed
+    worker_seed = torch.initial_seed() % 2**32
+    # Set seeds for all relevant libraries
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+    # For CUDA:
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(worker_seed)
+        torch.cuda.manual_seed_all(worker_seed)
 
 
 class NeRFData(L.LightningDataModule):
@@ -27,17 +40,18 @@ class NeRFData(L.LightningDataModule):
         """
         super().__init__()
         self.save_hyperparameters()
+        data.RayDataset.disable_multiprocessing_length_warning()
 
     def load_from_file(self):
-        return U.data.load_obj_data(self.hparams.object_name)
+        return data.load_obj_data(self.hparams.object_name)
 
     def setup(self, stage: str):
         images, c2ws, focal = self.load_from_file()
-        self.hparams.near, self.hparams.far = U.data.compute_near_far_planes(c2ws=c2ws)
+        self.hparams.near, self.hparams.far = data.compute_near_far_planes(c2ws=c2ws)
         self.hparams.focal = focal.item()
         self.save_hyperparameters()
 
-        val_idxs = U.data.find_val_angles(
+        val_idxs = data.find_val_angles(
             c2ws=c2ws,
             horizontal_partitions=self.hparams.horizontal_val_angles,
             vertical_partitions=self.hparams.vertical_val_angles,
@@ -48,7 +62,7 @@ class NeRFData(L.LightningDataModule):
         train_imgs, train_c2ws = images[train_idxs], c2ws[train_idxs]
 
         if stage == "fit":
-            self.train_rays: U.data.RayDataset = U.data.RayDataset(
+            self.train_rays: data.RayDataset = data.RayDataset(
                 images=train_imgs,
                 c2ws=train_c2ws,
                 focal=torch.tensor(self.hparams.focal, dtype=torch.float32),
@@ -71,8 +85,8 @@ class NeRFData(L.LightningDataModule):
             batch_size=self.hparams.batch_size,
             shuffle=False,
             num_workers=4,
-            prefetch_factor=4,
             persistent_workers=True,
+            worker_init_fn=w_init_fn,
         )
 
     def val_dataloader(self):
@@ -82,56 +96,29 @@ class NeRFData(L.LightningDataModule):
             shuffle=False,
             num_workers=2,
             persistent_workers=True,
+            worker_init_fn=w_init_fn
         )
 
 
-class LNeRF(L.LightningModule):
-    def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
-                 min_res: int = 16, max_res: int = 2048, max_res_dense: int = 256, f_res: int = 128,
-                 f_sigma_init: float = 0.04, f_sigma_threshold: float = 0.01, f_stochastic_test: bool = True,
-                 f_update_decay: float = 0.7, f_update_noise_scale: float = None, f_update_selection_rate: float = 0.25,
-                 coarse_samples: int = 64, fine_samples: int = 128, **kwargs):
+class LVolume(L.LightningModule):
+    def __init__(self, coarse_samples: int = 64, fine_samples: int = 128, **kwargs):
         """Init
 
         Args:
-            hidden_size: Hidden size for Linear layers
-            encoding_log2: Log2 of encoding count for MLHHE
-            embed_dims: Output embedding dimensions for MLHHE
-            levels: Level count for MLHHE
-            min_res: Minimal resolution of MLHHE
-            max_res: Max resolution of MLHHE
-            max_res_dense: Resolution to swap to sparse encoding for MLHHE
-            f_res: Occupancy Grid Filter resolution
-            f_sigma_init: OGF density init
-            f_sigma_threshold: OGF density threshold
-            f_stochastic_test: Toggles OGF stochastic test
-            f_update_decay: OGF update decay
-            f_update_noise_scale: OGF update noise scale
-            f_update_selection_rate: Rate of OGF update selection
             coarse_samples: Initial samples to take per ray
             fine_samples: Hierarchical resampling sample count
         """
         super().__init__()
         self.save_hyperparameters()
-        self.nerf = U.nn.InstantNGP(
-            hidden_size=self.hparams.hidden_size,
-            encoding_log2=self.hparams.encoding_log2,
-            embed_dims=self.hparams.embed_dims,
-            levels=self.hparams.levels,
-            min_res=self.hparams.min_res,
-            max_res=self.hparams.max_res,
-            max_res_dense=self.hparams.max_res_dense,
-            f_res=self.hparams.f_res,
-            f_sigma_init=self.hparams.f_sigma_init,
-            f_sigma_threshold=self.hparams.f_sigma_threshold,
-            f_stochastic_test=self.hparams.f_stochastic_test,
-            f_update_decay=self.hparams.f_update_decay,
-            f_update_noise_scale=self.hparams.f_update_noise_scale,
-            f_update_selection_rate=self.hparams.f_update_selection_rate,
-        )
+        self.nerf: torch.nn.Module = None
 
         self.lossf = MSELoss(reduction='none')
         self.psnr = PeakSignalNoiseRatio()
+
+    def setup(self, stage):
+        if self.nerf is None:
+            raise NotImplementedError(f"{self.__class__} must have .nerf attribute defined")
+        return super().setup(stage)
 
     def compute_along_rays(self, origins: Tensor, directions: Tensor, near: float | None = None,
                            far: float | None = None, coarse_samples: int | None = None, fine_samples: int | None = None,
@@ -159,7 +146,7 @@ class LNeRF(L.LightningModule):
         fine_samples = fine_samples or self.hparams.fine_samples
 
         # This function deviates from the original NeRF paper as coarse and fine samples are processed by the same model
-        points, expanded_directions, coarse_depths = U.rays.sample_ray_uniformally(
+        points, expanded_directions, coarse_depths = rays.sample_ray_uniformally(
             origins=origins,
             directions=directions,
             near=near,
@@ -175,7 +162,7 @@ class LNeRF(L.LightningModule):
             torch.tensor(far, dtype=torch.float32, device=self.device).expand(origins.shape[0], 1),
         ], -1)
 
-        points, expanded_directions, fine_depths = U.rays.sample_ray_hierarchically(
+        points, expanded_directions, fine_depths = rays.sample_ray_hierarchically(
             origins=origins,
             directions=directions,
             num_samples=fine_samples,
@@ -219,7 +206,7 @@ class LNeRF(L.LightningModule):
             [0, focal.item(), height // 2],
             [0, 0, 1],
         ], dtype=torch.float32, device=self.device)
-        origins, directions = U.rays.create_rays(
+        origins, directions = rays.create_rays(
             height=height,
             width=width,
             intrinsic=intrinsic,
@@ -231,7 +218,7 @@ class LNeRF(L.LightningModule):
         image = []
         for o, d in data:
             _, _, rgbs, depths = self.compute_along_rays(o, d, near, far)
-            rgb, _, alpha = U.rays.render_rays(rgbs, depths)
+            rgb, _, alpha = rays.render_rays(rgbs, depths)
             image.append(torch.cat((rgb, alpha), dim=-1))
 
         return torch.cat(image, 0).reshape(height, width, -1)
@@ -240,9 +227,9 @@ class LNeRF(L.LightningModule):
         pointers, origins, directions, colors = batch
         coarse_rgbs, coarse_depths, fine_rgbs, fine_depths = self.compute_along_rays(origins, directions)
 
-        coarse_colors, _, coarse_alphas = U.rays.render_rays(rgbs=coarse_rgbs, depths=coarse_depths)
-        fine_colors, _, fine_alphas = U.rays.render_rays(rgbs=fine_rgbs, depths=fine_depths)
-        
+        coarse_colors, _, coarse_alphas = rays.render_rays(rgbs=coarse_rgbs, depths=coarse_depths)
+        fine_colors, _, fine_alphas = rays.render_rays(rgbs=fine_rgbs, depths=fine_depths)
+
         if colors.shape[-1] == 4:  # RGBA, apply background noise to ensure 0 density background
             colors, alphas = colors[..., :3], colors[..., 3:4]
             noise = torch.empty_like(colors).uniform_(0.0, 1.0)
@@ -268,12 +255,13 @@ class LNeRF(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         c2w, focal, image = batch
         render = self.render_image(image.shape[1], image.shape[2], c2w[0], focal[0]).unsqueeze(0)
-        loss = self.lossf(render[..., :3], image[..., :3]).mean()
+        if image.shape[-1] != 4:
+            render = render[..., :3]
 
         render, image = render.permute(0, 3, 1, 2), image.permute(0, 3, 1, 2)
-        psnr = self.psnr(render[:, :3, ...], image[:, :3, ...])
+        psnr = self.psnr(render, image)
 
-        metrics = {"val_loss": loss, "val_psnr": psnr}
+        metrics = {"val_psnr": psnr}
         self.log_dict(metrics, prog_bar=True, on_epoch=True, on_step=False)
 
         self.val_imgs.append(render)
@@ -286,23 +274,7 @@ class LNeRF(L.LightningModule):
         self.val_imgs.clear()
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam([
-            {"params": self.nerf.mlhhe.parameters(), "weight_decay": 0.},
-            {"params": self.nerf.rgb_mlp.parameters(), "weight_decay": 10**-6},
-            {"params": self.nerf.feature_mlp.parameters(), "weight_decay": 10**-6}
-        ], lr=1e-2, betas=(0.9, 0.99), eps=1e-15)
-
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    optimizer, min_lr=1e-4, factor=0.75, patience=2, mode="max"
-                ),
-                "interval": "epoch",
-                "frequency": 1,
-                "monitor": "val_psnr",
-            }
-        }
+        raise NotImplementedError("configure_optimizers must be overwritten in subclass")
 
 
 class OGFilterCallback(Callback):
@@ -324,40 +296,7 @@ class PixelSamplerUpdateCallback(Callback):
 
             weights = [trainer.datamodule.train_rays.data[i][3].weights for i in list(range(8))]
             weights = torch.stack(weights, dim=0).unsqueeze(1).expand(-1, 3, -1, -1)
-            trainer.logger.experiment.add_image("Sample weights", make_grid(weights, nrow=4, padding=5), trainer.global_step)
+            trainer.logger.experiment.add_image(
+                "Sample weights", make_grid(weights, nrow=4, padding=5), trainer.global_step
+            )
         return super().on_validation_epoch_end(trainer, pl_module)
-
-
-if __name__ == '__main__':
-    """
-    # Remove warning for train dataloader having num_workers=1
-    warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
-    warnings.filterwarnings("ignore", ".*Consider setting `persistent_workers*")
-    # Remove warning for iterabledataset __len__
-    warnings.filterwarnings("ignore", ".*Your `IterableDataset` has `__len__` defined.*")
-    """
-
-    if torch.cuda.is_available():
-        torch.set_float32_matmul_precision('high')
-
-    accumulation = 2**16
-    data = NeRFData("tiny_nerf_data", batch_size=2**12, epoch_size=2**20, rays_per_image=2**12)
-    module = LNeRF(encoding_log2=19, max_res=2048, levels=16, hidden_size=64)
-    logger = TensorBoardLogger(".", default_hp_metric=False)
-
-    batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
-    trainer = L.Trainer(
-        max_epochs=100, check_val_every_n_epoch=1,
-        log_every_n_steps=1, logger=logger, reload_dataloaders_every_n_epochs=1,
-        accumulate_grad_batches=accumulation // data.hparams.batch_size if data.hparams.batch_size < accumulation else 1,
-        callbacks=[
-            OGFilterCallback(2**22 // accumulation),
-            PixelSamplerUpdateCallback(),
-            LearningRateMonitor(logging_interval="step"),
-            ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1),
-            ModelCheckpoint(filename="best_train_loss_{step}", monitor="train_loss", mode="min"),
-            ModelCheckpoint(filename="{epoch}", every_n_epochs=1),
-        ],
-    )
-
-    trainer.fit(model=module, datamodule=data)

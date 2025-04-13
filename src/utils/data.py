@@ -1,14 +1,19 @@
 import torch
 from torch import Tensor
-from torch.utils.data import WeightedRandomSampler, IterableDataset, RandomSampler
+from torch.utils.data import IterableDataset
 import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
 from collections import deque
 from typing import Iterator
+import torch.multiprocessing as mp
+from math import ceil
+import warnings
 
 from .rays import create_rays, sobel_filter
 from .mesh_render import render_mesh
+
+mp.set_start_method('spawn', force=True)
 
 
 def create_nerf_data(image: Tensor, c2w: Tensor, focal: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
@@ -39,7 +44,7 @@ def create_nerf_data(image: Tensor, c2w: Tensor, focal: Tensor) -> tuple[Tensor,
 
 
 class ImportantPixelSampler():
-    """Sampler implementing Important Pixels Sampling for NeRF"""
+    """Multiprocessing ready sampler implementing Important Pixels Sampling for NeRF"""
 
     def __init__(self, weights: Tensor, num_samples: int, error_kernel_size: int = 5):
         """Init
@@ -48,30 +53,33 @@ class ImportantPixelSampler():
             weights (shape[H, W]): Pixel weights assigned by edge detection
             num_samples: Number of samples to draw per __iter__ (epoch)
         """
+        self.lock = mp.Lock()
+
         self.num_samples = num_samples
         weights = weights.to(torch.float32)
-        self.weights: Tensor = torch.clamp(weights / weights.max() + 1e-2, 0.0, 1.0)
+        self.weights: Tensor = torch.clamp(weights / weights.max() + 2e-2, 0.0, 1.0)
         """(shape[H, W]) Weights used for choosing the next samples"""
+        self.weights.share_memory_()
 
-        self.errors: Tensor = torch.ones_like(self.weights) * 0.2
+        self.errors: Tensor = torch.ones_like(self.weights)
         """(shape[H, W]) Stores squared errors for pixels"""
+        self.errors.share_memory_()
 
-        sigma = 3.5
-        x = torch.arange(error_kernel_size, dtype=torch.float32) - error_kernel_size//2
-        y = torch.arange(error_kernel_size, dtype=torch.float32) - error_kernel_size//2
+        sigma = 2.5
+        x = torch.arange(error_kernel_size, dtype=torch.float32) - error_kernel_size // 2
+        y = torch.arange(error_kernel_size, dtype=torch.float32) - error_kernel_size // 2
         y, x = torch.meshgrid(y, x, indexing='ij')
         # Compute 2D Gaussian
         kernel = torch.exp(-(x**2 + y**2) / (2 * sigma**2))
         kernel = kernel / kernel.sum()  # Normalize to sum to 1
         self.kernel = kernel.unsqueeze(0).unsqueeze(0)
 
-    def __iter__(self):
-        rand_tensor = torch.multinomial(
-            self.weights.view(-1), self.num_samples, False, generator=None,
-
-        )
-        idxs = torch.stack((rand_tensor // self.weights.shape[1], rand_tensor % self.weights.shape[1]), dim=-1)
-        yield from iter(idxs.tolist())
+    def sample_indices(self):
+        with self.lock:
+            rand_tensor = torch.multinomial(
+                self.weights.view(-1), self.num_samples, False, generator=None,
+            )
+            return torch.stack((rand_tensor // self.weights.shape[1], rand_tensor % self.weights.shape[1]), dim=-1)
 
     def update_errors(self, idxs: Tensor, errors: Tensor):
         """Updates errors for given indices
@@ -80,17 +88,24 @@ class ImportantPixelSampler():
             idxs (shape[K, 2]): Specifies which indicies to edit weights on
             errors (shape[K]): Freshly calculated squared errors for the idxs
         """
-        idxs = idxs.cpu().detach()
-        errors = errors.cpu().detach()
-        self.errors[idxs[:, 0], idxs[:, 1]] = errors
-
+        with self.lock:
+            idxs = idxs.cpu().detach()
+            errors = errors.cpu().detach()
+            self.errors[idxs[:, 0], idxs[:, 1]] = errors
 
     def update_weights(self):
-        """Applies errors to weights with normalization"""
-        errors = self.errors.unsqueeze(0).unsqueeze(0)
-        blurred_errors = F.conv2d(errors, self.kernel, padding=self.kernel.shape[-1] // 2)
-        blurred_errors = blurred_errors.squeeze(0).squeeze(0)
-        self.weights = blurred_errors / blurred_errors.max()
+        """Applies errors to weights with blurring and normalization"""
+        with self.lock:
+            errors = self.errors.unsqueeze(0).unsqueeze(0)
+            blurred_errors = F.conv2d(errors, self.kernel, padding=self.kernel.shape[-1] // 2)
+            blurred_errors = blurred_errors.squeeze(0).squeeze(0) / blurred_errors.max()
+
+            nonzeros = ~torch.isclose(torch.zeros_like(blurred_errors), blurred_errors)
+            if nonzeros.sum() > 0:
+                low, high = blurred_errors[nonzeros].quantile(0.1), blurred_errors[nonzeros].quantile(0.95)
+                blurred_errors = torch.clamp(blurred_errors, low, high)
+
+            self.weights.copy_(blurred_errors)
 
 
 def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical_partitions: int = 2):
@@ -230,7 +245,7 @@ def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None =
 
 
 class RayDataset(IterableDataset):
-    """Dataset that samples rays by image, images and rays inside them are weighted"""
+    """Multiprocessing ready Dataset that samples rays by image, images and rays inside them are weighted"""
 
     def __init__(self, images: Tensor, c2ws: Tensor, focal: Tensor, rays_per_image: int, length: int,
                  subpixel_sampling: bool = False):
@@ -244,6 +259,8 @@ class RayDataset(IterableDataset):
             length: Length Ligthning will use for epochs
         """
         super(RayDataset, self).__init__()
+        self.lock = mp.Lock()
+
         self.rays_per_image = rays_per_image
         self._length = length
         self.subpixel_sampling = subpixel_sampling
@@ -262,6 +279,7 @@ class RayDataset(IterableDataset):
             ))
 
         self.image_weights = torch.tensor([d[3].weights.sum() for d in self.data])
+        self.image_weights.share_memory_()
 
     def __len__(self):
         return self._length
@@ -276,25 +294,41 @@ class RayDataset(IterableDataset):
             directions (shape[3]): Cartesian ray direction in World
             colors (shape[3-4]): RGB(A) colors for ray
         """
+        worker_info = torch.utils.data.get_worker_info()
+
+        if worker_info is None:  # Single-process loading
+            iter_length = self._length
+        else:  # Multi-process loading
+            per_worker = int(ceil(self._length / worker_info.num_workers))
+            iter_length = per_worker
+
         ray_idxs = deque([])
         image_idx = None
-        for i in range(self._length):
+        for _ in range(iter_length):
             if not ray_idxs:
-                image_idx = torch.multinomial(self.image_weights, num_samples=1).item()
-                origins, directions, colors, sampler, diffs = self.data[image_idx]
-                ray_idxs = deque([i for i in sampler])
+                with self.lock:
+                    image_idx = torch.multinomial(self.image_weights, num_samples=1)
+                o, d, c, sampler, diffs = self.data[image_idx.item()]
+                idxs = sampler.sample_indices()
+
+                # Indexing to allow direction modulation efficiently
+                pointers = torch.cat([image_idx.unsqueeze(0).expand(idxs.shape[0], -1), idxs], dim=-1)
+                origins = o[idxs[:, 0], idxs[:, 1]]
+                directions = d[idxs[:, 0], idxs[:, 1]]
+                colors = c[idxs[:, 0], idxs[:, 1]]
+
+                # Direction modulation for subpixel sampling
+                if self.subpixel_sampling:
+                    modulation = torch.rand([idxs.shape[0], 2, 1], dtype=torch.float32) - 0.5
+                    modulation = torch.sum(modulation * diffs.unsqueeze(0), 1)
+                    directions = F.normalize(
+                        directions + modulation, "fro", -1
+                    )
+
+                ray_idxs = deque(list(range(idxs.shape[0])))
 
             idx = ray_idxs.pop()
-            pointer = torch.tensor([image_idx] + idx, dtype=int)
-
-            direction = directions[*idx]
-            if self.subpixel_sampling:
-                # Calculate subpixel direction
-                direction = F.normalize(
-                    directions + (torch.rand([2, 1], dtype=torch.float32) * diffs).sum(0), "fro", -1
-                )
-
-            yield pointer, origins[*idx], direction, colors[*idx]
+            yield pointers[idx], origins[idx], directions[idx], colors[idx]
 
         raise StopIteration()
 
@@ -305,14 +339,20 @@ class RayDataset(IterableDataset):
             pointers (shape[K, 2]): Specifies which samplers and indices to edit weights on
             errors (shape[K]): Freshly calculated squared errors for the pointers
         """
-        for v in torch.unique(pointers[:, 0]):
-            mask = pointers[:, 0] == v
-            sampler: ImportantPixelSampler = self.data[v][3]
-            sampler.update_errors(pointers[mask][:, 1:], errors[mask])
+        with self.lock:
+            for v in torch.unique(pointers[:, 0]):
+                mask = pointers[:, 0] == v
+                sampler: ImportantPixelSampler = self.data[v][3]
+                sampler.update_errors(pointers[mask][:, 1:], errors[mask])
 
     def update_weights(self):
         """Update sampler weights"""
-        for i in range(len(self.data)):
-            sampler = self.data[i][3]
-            sampler.update_weights()
-            self.image_weights[i] = sampler.weights.sum()
+        with self.lock:
+            for i in range(len(self.data)):
+                sampler = self.data[i][3]
+                sampler.update_weights()
+                self.image_weights[i] = sampler.weights.sum()
+
+    @staticmethod
+    def disable_multiprocessing_length_warning():
+        warnings.filterwarnings("ignore", ".*Your `IterableDataset` has `__len__` defined*")
