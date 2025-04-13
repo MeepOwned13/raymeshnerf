@@ -77,8 +77,8 @@ def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 4
     focal = (size / 2) / np.tan(np.deg2rad(fov_x) / 2)
 
     i = np.arange(0, n, dtype=float) + 0.5
-    phis = np.rad2deg(np.pi * i * (1 + np.sqrt(5))) % 360
-    thetas = np.rad2deg(np.arccos(1 - 2 * i / n))
+    thetas = np.rad2deg(np.pi * i * (1 + np.sqrt(5))) % 360
+    phis = np.rad2deg(np.arccos(1 - 2 * i / n))
 
     if not deterministic:
         # Small modulation to angles
@@ -91,7 +91,11 @@ def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 4
         'fov_axis': 'x',
         'to_world': ST().look_at(
             # Apply two rotations to convert from spherical coordinates to world 3D coordinates.
-            origin=ST().rotate([0, 0, 1], phi).rotate([0, 1, 0], theta) @ mi.ScalarPoint3f([0, 0, radius]),
+            origin=[
+                radius * np.cos(phi) * np.sin(theta),
+                radius * np.sin(phi),
+                radius * np.cos(phi) * np.cos(theta),
+            ],
             target=[0, 0, 0],
             up=[0, 0, 1],
         )
@@ -109,7 +113,7 @@ def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 4
             'type': 'hdrfilm',
             'width': size * len(sensors),
             'height': size,
-            'pixel_format': 'rgb',
+            'pixel_format': 'rgba',
             'filter': {
                 'type': 'tent'
             }
@@ -120,7 +124,7 @@ def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 4
     return mi.load_dict(batch_sensor), extrinsics, focal.astype(np.float32)
 
 
-def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: int = 800, fov_x: float = 40,
+def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: int = 200, fov_x: float = 40,
                 deterministic=False) -> tuple[np.ndarray, np.ndarray, float]:
     """Renders mesh specified by path from multiple angles
 
@@ -139,18 +143,40 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
     """
     mesh = load_and_normalize_mesh(obj_path)
 
-    scene: mi.Scene = mi.load_dict({
+    scene_dict: dict = {
         'type': 'scene',
-        'integrator': {'type': 'path'},
+        'integrator': {'type': 'path', 'max_depth': 4},
+        'obj': mesh,
         'light': {
             'type': 'constant',
             'radiance': {
                 'type': 'rgb',
-                'value': 1.0
+                'value': 1.0,
             }
         },
-        'obj': mesh
-    })
+    }
+
+    """
+    # Multiple directional lights to ensure black background
+    for i, pos in enumerate([
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [1.0, 0, 0.0],
+        [-1.0, 0, 0.0],
+        [0.0, 0, 1.0],
+        [0.0, 0, -1.0],
+    ]):
+        scene_dict[f'light{i}'] = {
+            'type': 'directional',
+            'direction': pos,
+            'irradiance': {
+                'type': 'rgb',
+                'value': 1,
+            }
+        }
+    """
+
+    scene: mi.Scene = mi.load_dict(scene_dict)
 
     sensor, extrinsics, focal = create_batch_sensor(
         n=sensor_count,
@@ -159,9 +185,10 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
         fov_x=fov_x,
         deterministic=deterministic,
     )
+
     render = np.asarray(mi.render(scene, sensor=sensor), dtype=np.float32).clip(0, 1)
     images = np.asarray(mi.Bitmap(render).convert(srgb_gamma=True, component_format=mi.Struct.Type.Float32))
-    images = images.reshape(800, -1, 800, 3).transpose(1, 0, 2, 3)
+    images = images.reshape(size, sensor_count, size, -1).transpose(1, 0, 2, 3)
 
     return images, extrinsics, focal
 

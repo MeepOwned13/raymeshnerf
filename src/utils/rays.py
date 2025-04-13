@@ -49,7 +49,7 @@ def sobel_filter(images: Tensor) -> Tensor:
     """Applies the Sobel-Feldman operator to a batch of images
 
     Args:
-        images (shape[K, W, H, 3]): Batch of rgb images
+        images (shape[K, W, H, 3-4]): Batch of rgb(a) images
 
     Return:
         edges (shape[K, W, H]): Edge intensities
@@ -70,7 +70,7 @@ def sobel_filter(images: Tensor) -> Tensor:
     weights = torch.stack([gx, gy], 0).unsqueeze(1)
     filter.weight = nn.Parameter(weights, requires_grad=False)
 
-    edges = filter(images.mean(dim=-1).unsqueeze(1))
+    edges = filter(images[..., :3].mean(dim=-1).unsqueeze(1))
     edges = torch.sqrt(torch.sum(edges ** 2, dim=1))
     return edges
 
@@ -214,16 +214,18 @@ def plot_ray_sampling(points: Tensor, origin: Tensor, cartesian_direction: Tenso
     plt.show()
 
 
-def render_rays(rgbs: Tensor, depths: Tensor) -> tuple[Tensor, Tensor]:
+def render_rays(rgbs: Tensor, depths: Tensor, white_background: bool = False) -> tuple[Tensor, Tensor]:
     """Performs Volumetric Rendering
 
     Args:
         rgbs (shape[N, M, 4]): RGB and Sigma values for sampled points
         depths (shape[N, M]): Specifies how far along the rays are the RGBSs
+        white_background: If background is white, model output rgb is inverted
 
     Returns:
         rgb (shape[N, 3]): RGB value calculated for ray
         depth (shape[N]): Approximated depth of ray termination
+        acc (shape[N, 1]): Sum of weights for pixel (alpha)
     """
     device = rgbs.device
 
@@ -237,8 +239,12 @@ def render_rays(rgbs: Tensor, depths: Tensor) -> tuple[Tensor, Tensor]:
     weights = alpha * torch.cumprod(
         torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + 1e-10], -1), -1
     )[:, :-1]
-    rgb = torch.sum(weights[..., None] * rgbs[..., :3], dim=-2)
-    depth = torch.sum(weights * depths, dim=-1)
 
-    return rgb, depth
+    rgb = torch.sum(weights[..., None] * rgbs[..., :3], dim=-2)
+    if white_background:
+        rgb = 1 - rgb
+    depth = torch.sum(weights * depths, dim=-1)
+    acc = torch.sum(weights, dim=-1).unsqueeze(-1)
+
+    return rgb, depth, acc
 
