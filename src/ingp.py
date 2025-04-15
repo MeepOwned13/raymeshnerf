@@ -77,7 +77,7 @@ if __name__ == '__main__':
         torch.set_float32_matmul_precision('medium')
 
     data = LU.NeRFData(
-        "tiny_nerf_data", batch_size=2**12, epoch_size=2**21, rays_per_image=2**12, subpixel_sampling=True
+        "Weisshai_Great_White_Shark", batch_size=2**12, epoch_size=2**22, rays_per_image=2**12,
     )
     module = LInstantNGP()
     logger = TensorBoardLogger(".", default_hp_metric=False)
@@ -85,11 +85,11 @@ if __name__ == '__main__':
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(
         max_epochs=200, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
-        gradient_clip_val=1.75, gradient_clip_algorithm="norm",
+        accumulate_grad_batches=2**8,
         callbacks=[
-            LU.OGFilterCallback(2**21 // data.hparams.batch_size),
+            LU.OGFilterCallback(2**14 // data.hparams.batch_size),
             LU.PixelSamplerUpdateCallback(),
-            LearningRateMonitor(logging_interval="step"),
+            LearningRateMonitor(logging_interval="epoch"),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1),
             ModelCheckpoint(filename="best_train_loss_{step}", monitor="train_loss", mode="min"),
             ModelCheckpoint(filename="{epoch}", every_n_epochs=1),

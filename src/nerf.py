@@ -10,7 +10,7 @@ import utils.lutils as LU
 class LNeRF(LU.LVolume):
     def __init__(self, num_layers: int = 8, hidden_size: int = 256, in_coordinates: int = 3, in_directions: int = 3,
                  skips: list[int] = [4], coord_encode_freq: int = 10, dir_encode_freq: int = 4,
-                 coarse_samples: int = 64, fine_samples: int = 128, lr: float = 2e-4, **kwargs):
+                 coarse_samples: int = 64, fine_samples: int = 128, lr: float = 1e-4, **kwargs):
         """Init
 
         Args:
@@ -38,14 +38,27 @@ class LNeRF(LU.LVolume):
         )
 
     def configure_optimizers(self):
-        return torch.optim.NAdam(self.nerf.parameters(), lr=self.hparams.lr)
+        optimizer = torch.optim.Adam(self.nerf.parameters(), lr=self.hparams.lr, weight_decay=1e-8)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, min_lr=1e-6, factor=0.7, patience=2, mode="max"
+                ),
+                "interval": "epoch",
+                "frequency": 1,
+                "monitor": "val_psnr",
+            }
+        }
 
 
 if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('medium')
 
-    data = LU.NeRFData("tiny_nerf_data", batch_size=2**9, epoch_size=2**20, rays_per_image=2**9)
+    data = LU.NeRFData(
+        "Shurtape_Tape_Purple_CP28", batch_size=2**9, epoch_size=2**19, rays_per_image=2**9
+    )
     module = LNeRF()
     logger = TensorBoardLogger(".", default_hp_metric=False)
 
@@ -53,8 +66,10 @@ if __name__ == '__main__':
     trainer = L.Trainer(
         max_epochs=200, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
         gradient_clip_val=1.75, gradient_clip_algorithm="norm",
+        accumulate_grad_batches=8,
         callbacks=[
             LU.PixelSamplerUpdateCallback(),
+            LearningRateMonitor(logging_interval="epoch"),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1),
             ModelCheckpoint(filename="best_train_loss_{step}", monitor="train_loss", mode="min"),
             ModelCheckpoint(filename="{epoch}", every_n_epochs=1),

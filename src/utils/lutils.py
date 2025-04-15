@@ -243,7 +243,8 @@ class LVolume(L.LightningModule):
             ).mean(-1)
         else:  # RGB
             loss = (self.lossf(coarse_colors, colors) + self.lossf(fine_colors, colors)).mean(-1)
-        self.trainer.datamodule.train_rays.update_errors(pointers, loss)
+
+        self.trainer.datamodule.train_rays.update_weights(pointers, loss)
         loss = loss.mean()
 
         self.log("train_loss", loss, prog_bar=True, on_step=True)
@@ -255,8 +256,9 @@ class LVolume(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         c2w, focal, image = batch
         render = self.render_image(image.shape[1], image.shape[2], c2w[0], focal[0]).unsqueeze(0)
-        if image.shape[-1] != 4:
-            render = render[..., :3]
+        if image.shape[-1] == 4:  # Transparency isn't handled well by PSNR
+            image = image[..., :3] * image[..., 3:4]
+            render = render[..., :3] * render[..., 3:4]
 
         render, image = render.permute(0, 3, 1, 2), image.permute(0, 3, 1, 2)
         psnr = self.psnr(render, image)
@@ -292,9 +294,10 @@ class OGFilterCallback(Callback):
 class PixelSamplerUpdateCallback(Callback):
     def on_validation_epoch_end(self, trainer, pl_module):
         if trainer and not trainer.sanity_checking:  # Disable image logging on sanity check
-            trainer.datamodule.train_rays.update_weights()
+            trainer.datamodule.train_rays.update_image_weights()
 
             weights = [trainer.datamodule.train_rays.data[i][3].weights for i in list(range(8))]
+            weights = [w / w.max() for w in weights]
             weights = torch.stack(weights, dim=0).unsqueeze(1).expand(-1, 3, -1, -1)
             trainer.logger.experiment.add_image(
                 "Sample weights", make_grid(weights, nrow=4, padding=5), trainer.global_step
