@@ -46,33 +46,34 @@ def create_nerf_data(image: Tensor, c2w: Tensor, focal: Tensor) -> tuple[Tensor,
 class ImportantPixelSampler():
     """Multiprocessing ready sampler implementing Important Pixels Sampling for NeRF"""
 
-    def __init__(self, weights: Tensor, num_samples: int, error_kernel_size: int = 5):
+    def __init__(self, weights: Tensor, num_samples: int, blur_kernel_size: int = 5,
+                 epsilon: float = 1e-4):
         """Init
 
         Args:
             weights (shape[H, W]): Pixel weights assigned by edge detection
             num_samples: Number of samples to draw per __iter__ (epoch)
+            blur_kernel_size: Blur kernel size to use in blur_weights()
+            epsilon: Specifies lowest weight/loss to use
         """
         self.lock = mp.Lock()
 
         self.num_samples = num_samples
-        weights = weights.to(torch.float32)
-        self.weights: Tensor = torch.clamp(weights / weights.max() + 2e-2, 0.0, 1.0)
+        self.weights: Tensor = weights + weights.to(torch.float32) / weights.max() * 0.9 + 0.1
         """(shape[H, W]) Weights used for choosing the next samples"""
         self.weights.share_memory_()
 
-        self.errors: Tensor = torch.ones_like(self.weights)
-        """(shape[H, W]) Stores squared errors for pixels"""
-        self.errors.share_memory_()
+        self.epsilon: Tensor = torch.tensor(epsilon, dtype=torch.float32)
+        """Epsilon to add to errors"""
 
-        sigma = 2.5
-        x = torch.arange(error_kernel_size, dtype=torch.float32) - error_kernel_size // 2
-        y = torch.arange(error_kernel_size, dtype=torch.float32) - error_kernel_size // 2
+        sigma = 1.5
+        x = torch.arange(blur_kernel_size, dtype=torch.float32) - blur_kernel_size // 2
+        y = torch.arange(blur_kernel_size, dtype=torch.float32) - blur_kernel_size // 2
         y, x = torch.meshgrid(y, x, indexing='ij')
         # Compute 2D Gaussian
         kernel = torch.exp(-(x**2 + y**2) / (2 * sigma**2))
-        kernel = kernel / kernel.sum()  # Normalize to sum to 1
         self.kernel = kernel.unsqueeze(0).unsqueeze(0)
+        self.blur_weights()
 
     def sample_indices(self):
         with self.lock:
@@ -81,8 +82,8 @@ class ImportantPixelSampler():
             )
             return torch.stack((rand_tensor // self.weights.shape[1], rand_tensor % self.weights.shape[1]), dim=-1)
 
-    def update_errors(self, idxs: Tensor, errors: Tensor):
-        """Updates errors for given indices
+    def update_weights(self, idxs: Tensor, errors: Tensor):
+        """Updates weights for given indices
 
         Args:
             idxs (shape[K, 2]): Specifies which indicies to edit weights on
@@ -91,19 +92,14 @@ class ImportantPixelSampler():
         with self.lock:
             idxs = idxs.cpu().detach()
             errors = errors.cpu().detach()
-            self.errors[idxs[:, 0], idxs[:, 1]] = errors
+            self.weights[idxs[:, 0], idxs[:, 1]] = errors + self.epsilon
 
-    def update_weights(self):
-        """Applies errors to weights with blurring and normalization"""
+    def blur_weights(self):
+        """Applies errors to weights with blurring"""
         with self.lock:
-            errors = self.errors.unsqueeze(0).unsqueeze(0)
-            blurred_errors = F.conv2d(errors, self.kernel, padding=self.kernel.shape[-1] // 2)
-            blurred_errors = blurred_errors.squeeze(0).squeeze(0) / blurred_errors.max()
-
-            nonzeros = ~torch.isclose(torch.zeros_like(blurred_errors), blurred_errors)
-            if nonzeros.sum() > 0:
-                low, high = blurred_errors[nonzeros].quantile(0.1), blurred_errors[nonzeros].quantile(0.95)
-                blurred_errors = torch.clamp(blurred_errors, low, high)
+            weights = self.weights.unsqueeze(0).unsqueeze(0)
+            blurred_errors = F.conv2d(weights, self.kernel, padding=self.kernel.shape[-1] // 2)
+            blurred_errors = blurred_errors.squeeze(0).squeeze(0)
 
             self.weights.copy_(blurred_errors)
 
@@ -332,8 +328,8 @@ class RayDataset(IterableDataset):
 
         raise StopIteration()
 
-    def update_errors(self, pointers: Tensor, errors: Tensor):
-        """Update errors with pointers
+    def update_weights(self, pointers: Tensor, errors: Tensor):
+        """Update weights with errors and pointers
 
         Args:
             pointers (shape[K, 2]): Specifies which samplers and indices to edit weights on
@@ -343,14 +339,13 @@ class RayDataset(IterableDataset):
             for v in torch.unique(pointers[:, 0]):
                 mask = pointers[:, 0] == v
                 sampler: ImportantPixelSampler = self.data[v][3]
-                sampler.update_errors(pointers[mask][:, 1:], errors[mask])
+                sampler.update_weights(pointers[mask][:, 1:], errors[mask])
 
-    def update_weights(self):
-        """Update sampler weights"""
+    def update_image_weights(self):
+        """Update image weights"""
         with self.lock:
             for i in range(len(self.data)):
                 sampler = self.data[i][3]
-                sampler.update_weights()
                 self.image_weights[i] = sampler.weights.sum()
 
     @staticmethod
