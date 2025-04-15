@@ -214,13 +214,12 @@ def plot_ray_sampling(points: Tensor, origin: Tensor, cartesian_direction: Tenso
     plt.show()
 
 
-def render_rays(rgbs: Tensor, depths: Tensor, white_background: bool = False) -> tuple[Tensor, Tensor]:
+def render_rays(rgbs: Tensor, depths: Tensor) -> tuple[Tensor, Tensor]:
     """Performs Volumetric Rendering
 
     Args:
         rgbs (shape[N, M, 4]): RGB and Sigma values for sampled points
         depths (shape[N, M]): Specifies how far along the rays are the RGBSs
-        white_background: If background is white, model output rgb is inverted
 
     Returns:
         rgb (shape[N, 3]): RGB value calculated for ray
@@ -237,12 +236,10 @@ def render_rays(rgbs: Tensor, depths: Tensor, white_background: bool = False) ->
     alpha = 1.0 - torch.exp(-F.relu(rgbs[..., 3]) * distances)
     # 1e10 ensures the last color is rendered no matter what
     weights = alpha * torch.cumprod(
-        torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + 1e-10], -1), -1
+        torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + torch.finfo(rgbs.dtype).eps], -1), -1
     )[:, :-1]
 
     rgb = torch.sum(weights[..., None] * rgbs[..., :3], dim=-2)
-    if white_background:
-        rgb = 1 - rgb
     depth = torch.sum(weights * depths, dim=-1)
     acc = torch.sum(weights, dim=-1).unsqueeze(-1)
 
