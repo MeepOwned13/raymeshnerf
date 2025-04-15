@@ -55,10 +55,12 @@ def sensor_c2w(sensor: mi.Sensor) -> np.ndarray:
     Returns:
         transformation(shape[4, 4]): Extrinsic camera matrix
     """
-    transformation = np.array(sensor.world_transform().matrix, dtype=np.float32)[:, :, 0]
-    # after experimentation, this -1 multiplier is required to get correct ray directions
-    transformation[:3, :3] *= -1
-    return transformation
+    transf = np.array(sensor.world_transform().matrix, dtype=np.float32)
+    if len(transf.shape) > 2:  # On CUDA its dim=3, on Scalar its dim=2
+        transf = transf[:, :, 0]
+    # -1 mult to z axis as mitsuba seems to represent camera outbound direction as [0,0,1]
+    transf[:3, 2] *= -1
+    return transf
 
 
 def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 40, deterministic=False) -> mi.Sensor:
@@ -77,29 +79,26 @@ def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 4
     focal = (size / 2) / np.tan(np.deg2rad(fov_x) / 2)
 
     i = np.arange(0, n, dtype=float) + 0.5
-    thetas = np.rad2deg(np.pi * i * (1 + np.sqrt(5))) % 360
-    phis = np.rad2deg(np.arccos(1 - 2 * i / n))
-
     if not deterministic:
-        # Small modulation to angles
-        thetas += np.random.randn(thetas.shape[0]).clip(-1, 1) * (thetas[1:] - thetas[:-1]).mean()
-        phis += np.random.randn(phis.shape[0]).clip(-1, 1) * (phis[1:] - phis[:-1]).mean()
+        i = i + np.random.uniform(-0.5, 0.5, size = n) / n
+        
+    phis = np.pi * i * (1 + np.sqrt(5))
+    thetas = np.arccos(1 - 2 * i / n)
 
     sensors: list[mi.Sensor] = [mi.load_dict({
         'type': 'perspective',
         'fov': fov_x,
         'fov_axis': 'x',
         'to_world': ST().look_at(
-            # Apply two rotations to convert from spherical coordinates to world 3D coordinates.
             origin=[
-                radius * np.cos(phi) * np.sin(theta),
-                radius * np.sin(phi),
-                radius * np.cos(phi) * np.cos(theta),
+                radius * np.sin(theta) * np.cos(phi),
+                radius * np.sin(theta) * np.sin(phi),
+                radius * np.cos(theta),
             ],
             target=[0, 0, 0],
-            up=[0, 0, 1],
+            up=[0, 0, 1],  # Mitsuba 3 uses z as the vertical axis
         )
-    }) for theta, phi in zip(thetas, phis)]
+    }) for phi, theta in zip(phis, thetas)]
 
     extrinsics: np.ndarray = np.stack([sensor_c2w(s) for s in sensors], axis=0)
 
@@ -145,7 +144,9 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
 
     scene_dict: dict = {
         'type': 'scene',
-        'integrator': {'type': 'path', 'max_depth': 4},
+        'integrator': {
+            'type': 'direct'
+        },
         'obj': mesh,
         'light': {
             'type': 'constant',
@@ -155,26 +156,6 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
             }
         },
     }
-
-    """
-    # Multiple directional lights to ensure black background
-    for i, pos in enumerate([
-        [0.0, 1.0, 0.0],
-        [0.0, -1.0, 0.0],
-        [1.0, 0, 0.0],
-        [-1.0, 0, 0.0],
-        [0.0, 0, 1.0],
-        [0.0, 0, -1.0],
-    ]):
-        scene_dict[f'light{i}'] = {
-            'type': 'directional',
-            'direction': pos,
-            'irradiance': {
-                'type': 'rgb',
-                'value': 1,
-            }
-        }
-    """
 
     scene: mi.Scene = mi.load_dict(scene_dict)
 
@@ -187,6 +168,9 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
     )
 
     render = np.asarray(mi.render(scene, sensor=sensor), dtype=np.float32).clip(0, 1)
+    # This is complicated because srgb conversion is done here too (saving to disk would do this too)
+    # If saving to disk is the goal, this shouldn't be done as the conversion would happen again
+    # This is bypassed by converting here, then saving as .npz which doesn't do a conversion
     images = np.asarray(mi.Bitmap(render).convert(srgb_gamma=True, component_format=mi.Struct.Type.Float32))
     images = images.reshape(size, sensor_count, size, -1).transpose(1, 0, 2, 3)
 
@@ -197,6 +181,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-on', '--object_name', type=str, required=True)
     parser.add_argument('-sc', '--sensor_count', type=int, default=64)
+    parser.add_argument('-s', '--size', type=int, default=200)
     args = parser.parse_args()
 
     obj_path = (Path(__file__) / "../../../data/raw_objects" / args.object_name).resolve().absolute()
