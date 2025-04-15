@@ -232,7 +232,7 @@ class LVolume(L.LightningModule):
 
         if colors.shape[-1] == 4:  # RGBA, apply background noise to ensure 0 density background
             colors, alphas = colors[..., :3], colors[..., 3:4]
-            noise = torch.empty_like(colors).uniform_(0.0, 1.0)
+            noise = torch.empty_like(colors).uniform_(-0.5, 0.5)
 
             mixed_colors = colors * alphas + noise * (1 - alphas)
             mixed_coarse_colors = coarse_colors * coarse_alphas + noise * (1 - coarse_alphas)
