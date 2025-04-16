@@ -66,7 +66,6 @@ if __name__ == '__main__':
     trainer = L.Trainer(
         max_epochs=200, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
         gradient_clip_val=1.75, gradient_clip_algorithm="norm",
-        accumulate_grad_batches=8,
         callbacks=[
             LU.PixelSamplerUpdateCallback(),
             LearningRateMonitor(logging_interval="epoch"),

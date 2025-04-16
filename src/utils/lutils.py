@@ -3,7 +3,7 @@ from torch import Tensor
 from torch.nn import MSELoss
 from torchvision.utils import make_grid
 from torch.utils.data import TensorDataset, DataLoader
-from torchmetrics.image import PeakSignalNoiseRatio
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure, LearnedPerceptualImagePatchSimilarity
 import lightning as L
 from lightning.pytorch.callbacks import Callback
 import random
@@ -114,6 +114,8 @@ class LVolume(L.LightningModule):
 
         self.lossf = MSELoss(reduction='none')
         self.psnr = PeakSignalNoiseRatio()
+        self.ssim = StructuralSimilarityIndexMeasure()
+        self.lpips = LearnedPerceptualImagePatchSimilarity()
 
     def setup(self, stage):
         if self.nerf is None:
@@ -256,17 +258,21 @@ class LVolume(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         c2w, focal, image = batch
         render = self.render_image(image.shape[1], image.shape[2], c2w[0], focal[0]).unsqueeze(0)
-        if image.shape[-1] == 4:  # Transparency isn't handled well by PSNR
-            image = image[..., :3] * image[..., 3:4]
-            render = render[..., :3] * render[..., 3:4]
+        
+        cloned_render = render.clone()  # Used for display
+        self.val_imgs.append(cloned_render.permute(0, 3, 1, 2))
+
+        if image.shape[-1] == 4:  # Transparency isn't handled well by PSNR, compositing with neutral gray background
+            background = 0.5 * torch.ones_like(render[..., :3])
+            image = (image[..., :3] * image[..., 3:4]) + (background * (1 - image[..., 3:4]))
+            render = (render[..., :3] * render[..., 3:4]) + (background * (1 - render[..., 3:4]))
 
         render, image = render.permute(0, 3, 1, 2), image.permute(0, 3, 1, 2)
         psnr = self.psnr(render, image)
-
-        metrics = {"val_psnr": psnr}
+        ssim = self.ssim(render, image)
+        lpips = self.lpips(render, image)
+        metrics = {"val_psnr": psnr, "val_ssim": ssim, "val_lpips": lpips}
         self.log_dict(metrics, prog_bar=True, on_epoch=True, on_step=False)
-
-        self.val_imgs.append(render)
         return metrics
 
     def on_validation_epoch_end(self):
