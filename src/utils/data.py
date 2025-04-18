@@ -151,8 +151,9 @@ def compute_near_far_planes(c2ws: Tensor) -> tuple[float, float]:
         c2ws (shape[K, 4, 4]): Extrinsic camera matrices (Camera to World)
 
     Returns:
-        near_plane: Minimal near plane found
-        far_plane: Maximal far plane found
+        tuple: tuple containing (near_plane, far_plane)
+        - **near_plane**: Minimal near plane found
+        - **far_plane**: Maximal far plane found
     """
     scene_bounds_min = torch.tensor([-1, -1, -1], dtype=torch.float32)
     scene_bounds_max = torch.tensor([1, 1, 1], dtype=torch.float32)
@@ -189,9 +190,10 @@ def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:
         path: .npz file path
 
     Returns:
-        images (shape[N, H, W, 3]): Images
-        c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
-        focal (shape[]): Focal length
+        tuple: tuple containing (images, c2ws, focal)
+        - **images**: *shape[N, H, W, 3]*: Images
+        - **c2ws**: *shape[N, 4, 4]*: Extrinisic camera matrices (Camera to World)
+        - **focal**: *shape[]*: Focal length
     """
     data = np.load(path)
 
@@ -213,9 +215,10 @@ def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None =
         verbose: Print rendering info
 
     Returns:
-        images (shape[N, H, W, 3]): Images
-        c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
-        focal (shape[]): Focal length
+        tuple: tuple containing (images, c2ws, focal)
+        - **images**: *shape[N, H, W, 3]*: Images
+        - **c2ws**: *shape[N, 4, 4]*: Extrinisic camera matrices (Camera to World)
+        - **focal**: *shape[]*: Focal length
     """
     directory = directory or f"{__file__}/../../../data"
 
@@ -285,10 +288,11 @@ class RayDataset(IterableDataset):
 
         rays_per_image samples are taken from a single image and yielded 1 by 1, after which a new image is chosen
 
-        Yields:
-            origins (shape[3]): Ray origin in World coordinates
-            directions (shape[3]): Cartesian ray direction in World
-            colors (shape[3-4]): RGB(A) colors for ray
+        Returns:
+            iterator: iterator of tuples containing (origins, directions, colors)
+            - **origins**: *shape[3]*: Ray origin in World coordinates
+            - **directions**: *shape[3]*: Cartesian ray direction in World
+            - **colors**: *shape[3-4]*: RGB(A) colors for ray
         """
         worker_info = torch.utils.data.get_worker_info()
 

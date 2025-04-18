@@ -136,9 +136,10 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
         deterministic: If False, modulates view directions a little
 
     Returns:
-        images(shape[sensor_count, size, size, 3]): Rendered images
-        extrinsics(shape[sensor_count, 4, 4]): Extrinsic camera matrices
-        focal: Focal length of cameras
+        tuple: tuple containing (images, extrinsics, focal)
+        - **images**: *shape[sensor_count, size, size, 3]*: Rendered images
+        - **extrinsics**: *shape[sensor_count, 4, 4]*: Extrinsic camera matrices
+        - **focal**: Focal length of cameras
     """
     mesh = load_and_normalize_mesh(obj_path)
 

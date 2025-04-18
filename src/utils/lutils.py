@@ -137,10 +137,11 @@ class LVolume(L.LightningModule):
             deterministic: Should hierarchical sampling be deterministic?
 
         Returns:
-            coarse_rgbs (shape[N, coarse_samples, 4]): RGBS predicted by NeRF for uniform samples
-            coarse_depths (shape[N, coarse_samples]): Depths sampled uniformally, sorted and aligned to coarse_rgbs
-            fine_rgbs (shape[N, fine_samples, 4]): RGBS predicted by NeRF for hierarchical samples
-            fine_depths (shape[N, fine_samples]): Depths sampled hierarchically, sorted and aligned to fine_rgbs
+            tuple: tuple containing (coarse_rgbs, coarse_depths, fine_rgbs, fine_depths)
+            - **coarse_rgbs**: *shape[N, coarse_samples, 4]*: RGBS predicted by NeRF for uniform samples
+            - **coarse_depths**: *shape[N, coarse_samples]*: Depths sampled uniformally, sorted and aligned to coarse_rgbs
+            - **fine_rgbs**: *shape[N, fine_samples, 4]*: RGBS predicted by NeRF for hierarchical samples
+            - **fine_depths**: *shape[N, fine_samples]*: Depths sampled hierarchically, sorted and aligned to fine_rgbs
         """
         near = self.hparams.get("near", near) or self.trainer.datamodule.hparams.near
         far = self.hparams.get("far", far) or self.trainer.datamodule.hparams.far

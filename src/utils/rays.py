@@ -14,8 +14,9 @@ def create_rays(height: int, width: int, intrinsic: Tensor, c2w: Tensor) -> tupl
         c2w (shape[4, 4]): Extrinsic camera matrix (Camera to World)
 
     Returns:
-        ray_origins (shape[width, height, 3]): Ray origins in World coordinates
-        ray_directions (shape[width, height, 3]): Cartesian ray directions in World
+        tuple: tuple containing (ray_origins, ray_directions)
+        - **ray_origins**: *shape[width, height, 3]*: Ray origins in World coordinates
+        - **ray_directions**: *shape[width, height, 3]*: Cartesian ray directions in World
     """
     device = c2w.device
 
@@ -88,9 +89,10 @@ def sample_ray_uniformally(origins: Tensor, directions: Tensor, near: float, far
         perturb: If True, adds noise to the depths
 
     Returns:
-        points (shpe[N, num_samples, 3]): Sampled points in World coordinates
-        directions (shape[N, num_samples, 3]): Original directions expanded to match the shape of points
-        depths (shape[N, num_samples]): Depth of each sampled point on the given ray
+        tuple: tuple containing (points, directions, depths)
+        - **points**: *shape[N, num_samples, 3]*: Sampled points in World coordinates
+        - **directions**: *shape[N, num_samples, 3]*: Original directions expanded to match the shape of points
+        - **depths**: *shape[N, num_samples]*: Depth of each sampled point on the given ray
     """
     device = origins.device
     depths = torch.linspace(near, far, num_samples, dtype=torch.float32, device=device).expand(origins.shape[0], -1)
@@ -168,10 +170,12 @@ def sample_ray_hierarchically(origins: Tensor, directions: Tensor, num_samples: 
         weights (shape[N, M]): Weights of bins calculated frm a previous sampling
         deterministic: If True, uses a linspace (also ensures sorted output) to re-sample instead of random
 
+
     Returns:
-        points (shpe[N, num_samples, 3]): Sampled points in World coordinates
-        directions (shape[N, num_samples, 3]): Original directions expanded to match the shape of points
-        depths (shape[N, num_samples]): Depth of each sampled point on the given ray
+        tuple: tuple containing (points, directions, depths)
+        - **points**: *shape[N, num_samples, 3]*: Sampled points in World coordinates
+        - **directions**: *shape[N, num_samples, 3]*: Original directions expanded to match the shape of points
+        - **depths**: *shape[N, num_samples]*: Depth of each sampled point on the given ray
     """
     depths = sample_pdf(bins, weights, num_samples, deterministic=deterministic)
 
@@ -214,7 +218,7 @@ def plot_ray_sampling(points: Tensor, origin: Tensor, cartesian_direction: Tenso
     plt.show()
 
 
-def render_rays(rgbs: Tensor, depths: Tensor) -> tuple[Tensor, Tensor]:
+def render_rays(rgbs: Tensor, depths: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     """Performs Volumetric Rendering
 
     Args:
@@ -222,9 +226,10 @@ def render_rays(rgbs: Tensor, depths: Tensor) -> tuple[Tensor, Tensor]:
         depths (shape[N, M]): Specifies how far along the rays are the RGBSs
 
     Returns:
-        rgb (shape[N, 3]): RGB value calculated for ray
-        depth (shape[N]): Approximated depth of ray termination
-        acc (shape[N, 1]): Sum of weights for pixel (alpha)
+        tuple: a tuple containing (rgb, depth, acc) where
+        - **rgb**: *shape[N, 3]*: RGB value calculated for ray,
+        - **depth**: *shape[N]*: Approximated depth of ray termination,
+        - **acc**: *shape[N, 1]*: Sum of weights for pixel (alpha)
     """
     device = rgbs.device
 

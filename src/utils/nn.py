@@ -121,8 +121,9 @@ class NeRF(nn.Module):
             skip_colors: Skip color calculation?
 
         Returns:
-            rgbs (shape[*..., 4]): RGB&Sigma if skip_colors=False
-            rgbs (shape[*...]): Sigma if skip_colors=True
+            Tensor: RGBS (skip_colors=True) or Sigma (skip_colors=False)
+                - **rgbs**: *shape[\*..., 4]*: RGB&Sigma
+                - **sigma**: *shape[\*...]*: Sigma
         """
         coordinates = self.coordinate_encoder(coordinates)
         features = coordinates
@@ -291,8 +292,9 @@ class InstantNGP(nn.Module):
             masked: Use occupancy grid filtering?
 
         Returns:
-            rgbs (shape[*..., 4]): RGB&Sigma if skip_colors=False
-            rgbs (shape[*...]): Sigma if skip_colors=True
+            Tensor: RGBS (skip_colors=True) or Sigma (skip_colors=False)
+                - **rgbs**: *shape[\*..., 4]*: RGB&Sigma
+                - **sigma**: *shape[\*...]*: Sigma
         """
         device = coordinates.device
         out_shape = list(coordinates.shape[:-1])
