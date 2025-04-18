@@ -218,12 +218,13 @@ def plot_ray_sampling(points: Tensor, origin: Tensor, cartesian_direction: Tenso
     plt.show()
 
 
-def render_rays(rgbs: Tensor, depths: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+def render_rays(rgbs: Tensor, depths: Tensor, far: float) -> tuple[Tensor, Tensor, Tensor]:
     """Performs Volumetric Rendering
 
     Args:
         rgbs (shape[N, M, 4]): RGB and Sigma values for sampled points
         depths (shape[N, M]): Specifies how far along the rays are the RGBSs
+        far: Specify far plane of rendering
 
     Returns:
         tuple: a tuple containing (rgb, depth, acc) where
@@ -234,12 +235,11 @@ def render_rays(rgbs: Tensor, depths: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     device = rgbs.device
 
     distances = depths[..., 1:] - depths[..., :-1]
-    # 1e10 ensures the last color is rendered no matter what
-    distances = torch.cat([distances, torch.tensor([1e10], device=device).expand(distances[..., :1].shape)], -1)
+    # Last distance is calculated from far plane (or 0 if point is beyond it)
+    distances = torch.cat([distances, F.relu(far - depths[..., -1:])], -1)
     # directions already normalized at ray calculation, so distances correspond to world already
 
     alpha = 1.0 - torch.exp(-F.relu(rgbs[..., 3]) * distances)
-    # 1e10 ensures the last color is rendered no matter what
     weights = alpha * torch.cumprod(
         torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + torch.finfo(rgbs.dtype).eps], -1), -1
     )[:, :-1]

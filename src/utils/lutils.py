@@ -112,14 +112,14 @@ class LVolume(L.LightningModule):
         self.save_hyperparameters()
         self.nerf: torch.nn.Module = None
 
-        self.lossf = MSELoss(reduction='none')
-        self.psnr = PeakSignalNoiseRatio()
-        self.ssim = StructuralSimilarityIndexMeasure()
-        self.lpips = LearnedPerceptualImagePatchSimilarity()
-
     def setup(self, stage):
         if self.nerf is None:
             raise NotImplementedError(f"{self.__class__} must have .nerf attribute defined")
+        if stage == "fit":
+            self.lossf = MSELoss(reduction='none')
+            self.psnr = PeakSignalNoiseRatio()
+            self.ssim = StructuralSimilarityIndexMeasure()
+            self.lpips = LearnedPerceptualImagePatchSimilarity()
         return super().setup(stage)
 
     def compute_along_rays(self, origins: Tensor, directions: Tensor, near: float | None = None,
@@ -221,21 +221,27 @@ class LVolume(L.LightningModule):
         image = []
         for o, d in data:
             _, _, rgbs, depths = self.compute_along_rays(o, d, near, far)
-            rgb, _, alpha = rays.render_rays(rgbs, depths)
+            rgb, _, alpha = rays.render_rays(rgbs=rgbs, depths=depths, far=far)
             image.append(torch.cat((rgb, alpha), dim=-1))
 
         return torch.cat(image, 0).reshape(height, width, -1)
 
     def training_step(self, batch, batch_idx):
+        far = self.hparams.get("far", None) or self.trainer.datamodule.hparams.far
+
         pointers, origins, directions, colors = batch
         coarse_rgbs, coarse_depths, fine_rgbs, fine_depths = self.compute_along_rays(origins, directions)
 
-        coarse_colors, _, coarse_alphas = rays.render_rays(rgbs=coarse_rgbs, depths=coarse_depths)
-        fine_colors, _, fine_alphas = rays.render_rays(rgbs=fine_rgbs, depths=fine_depths)
+        coarse_colors, _, coarse_alphas = rays.render_rays(
+            rgbs=coarse_rgbs, depths=coarse_depths, far=far
+        )
+        fine_colors, _, fine_alphas = rays.render_rays(
+            rgbs=fine_rgbs, depths=fine_depths, far=far
+        )
 
         if colors.shape[-1] == 4:  # RGBA, apply background noise to ensure 0 density background
             colors, alphas = colors[..., :3], colors[..., 3:4]
-            noise = torch.empty_like(colors).uniform_(-0.5, 0.5)
+            noise = torch.empty_like(colors).uniform_(0.35, 0.65)
 
             mixed_colors = colors * alphas + noise * (1 - alphas)
             mixed_coarse_colors = coarse_colors * coarse_alphas + noise * (1 - coarse_alphas)
@@ -284,6 +290,12 @@ class LVolume(L.LightningModule):
 
     def configure_optimizers(self):
         raise NotImplementedError("configure_optimizers must be overwritten in subclass")
+    
+    def on_save_checkpoint(self, checkpoint):
+        keys = [k for k in checkpoint["state_dict"].keys() if "lpips" in k]
+        for k in keys:
+            del checkpoint["state_dict"][k]
+        return super().on_save_checkpoint(checkpoint)
 
 
 class OGFilterCallback(Callback):

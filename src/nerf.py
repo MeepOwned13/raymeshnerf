@@ -43,7 +43,7 @@ class LNeRF(LU.LVolume):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    optimizer, min_lr=1e-6, factor=0.7, patience=2, mode="max"
+                    optimizer, min_lr=1e-6, factor=0.7, patience=2, mode="max", cooldown=2
                 ),
                 "interval": "epoch",
                 "frequency": 1,
@@ -56,6 +56,7 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('medium')
 
+
     data = LU.NeRFData(
         "Shurtape_Tape_Purple_CP28", batch_size=2**9, epoch_size=2**19, rays_per_image=2**9
     )
@@ -65,7 +66,7 @@ if __name__ == '__main__':
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(
         max_epochs=200, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
-        gradient_clip_val=1.75, gradient_clip_algorithm="norm",
+        gradient_clip_val=2.5, gradient_clip_algorithm="norm",
         callbacks=[
             LU.PixelSamplerUpdateCallback(),
             LearningRateMonitor(logging_interval="epoch"),
