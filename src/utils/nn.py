@@ -116,14 +116,14 @@ class NeRF(nn.Module):
         coordinates and directions must have the same dimensions for *...
 
         Args:
-            coordinates (shape[*..., in_coordinates]): Input point coordinates
-            directions (shape[*..., in_directions]): Input directions
+            coordinates (shape[..., in_coordinates]): Input point coordinates
+            directions (shape[..., in_directions]): Input directions
             skip_colors: Skip color calculation?
 
         Returns:
             Tensor: RGBS (skip_colors=True) or Sigma (skip_colors=False)
-                - **rgbs**: *shape[\*..., 4]*: RGB&Sigma
-                - **sigma**: *shape[\*...]*: Sigma
+                - **rgbs**: *shape[..., 4]*: RGB&Sigma
+                - **sigma**: *shape[...]*: Sigma
         """
         coordinates = self.coordinate_encoder(coordinates)
         features = coordinates
@@ -286,15 +286,15 @@ class InstantNGP(nn.Module):
         coordinates and directions must have the same dimensions for *...
 
         Args:
-            coordinates (shape[*..., in_coordinates]): Input point coordinates
-            directions (shape[*..., in_directions]): Input directions
+            coordinates (shape[..., in_coordinates]): Input point coordinates
+            directions (shape[..., in_directions]): Input directions
             skip_colors: Skip color calculation?
             masked: Use occupancy grid filtering?
 
         Returns:
             Tensor: RGBS (skip_colors=True) or Sigma (skip_colors=False)
-                - **rgbs**: *shape[\*..., 4]*: RGB&Sigma
-                - **sigma**: *shape[\*...]*: Sigma
+                - **rgbs**: *shape[..., 4]*: RGB&Sigma
+                - **sigma**: *shape[...]*: Sigma
         """
         device = coordinates.device
         out_shape = list(coordinates.shape[:-1])
