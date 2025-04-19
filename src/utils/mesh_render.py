@@ -58,12 +58,13 @@ def sensor_c2w(sensor: mi.Sensor) -> np.ndarray:
     transf = np.array(sensor.world_transform().matrix, dtype=np.float32)
     if len(transf.shape) > 2:  # On CUDA its dim=3, on Scalar its dim=2
         transf = transf[:, :, 0]
-    # -1 mult to z axis as mitsuba seems to represent camera outbound direction as [0,0,1]
+    # transforming z-forward, x-left to z-backward, x-right
     transf[:3, 2] *= -1
+    transf[:3, 0] *= -1
     return transf
 
 
-def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 40, deterministic=False) -> mi.Sensor:
+def create_batch_sensor(n: int, radius: float, size: int = 200, fov_x: float = 40, deterministic=False) -> mi.Sensor:
     """Creates a Mitsuba batch sensor
 
     Args:
@@ -123,7 +124,7 @@ def create_batch_sensor(n: int, radius: float, size: int = 800, fov_x: float = 4
     return mi.load_dict(batch_sensor), extrinsics, focal.astype(np.float32)
 
 
-def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: int = 200, fov_x: float = 40,
+def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: int = 100, fov_x: float = 40,
                 deterministic=False) -> tuple[np.ndarray, np.ndarray, float]:
     """Renders mesh specified by path from multiple angles
 
