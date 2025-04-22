@@ -56,9 +56,8 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('medium')
 
-
     data = LU.NeRFData(
-        "Shurtape_Tape_Purple_CP28", batch_size=2**9, epoch_size=2**19, rays_per_image=2**9
+        "Shurtape_Tape_Purple_CP28", batch_size=2**9, epoch_size=2**20, rays_per_image=2**9
     )
     module = LNeRF()
     logger = TensorBoardLogger(".", default_hp_metric=False)
@@ -66,7 +65,7 @@ if __name__ == '__main__':
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(
         max_epochs=200, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
-        gradient_clip_val=2.5, gradient_clip_algorithm="norm",
+        gradient_clip_val=1.75, gradient_clip_algorithm="norm",
         callbacks=[
             LU.PixelSamplerUpdateCallback(),
             LearningRateMonitor(logging_interval="epoch"),

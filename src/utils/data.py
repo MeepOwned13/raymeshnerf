@@ -47,7 +47,7 @@ class ImportantPixelSampler():
     """Multiprocessing ready sampler implementing Important Pixels Sampling for NeRF"""
 
     def __init__(self, weights: Tensor, num_samples: int, blur_kernel_size: int = 5,
-                 epsilon: float = 1e-4):
+                 epsilon: float = 1e-5):
         """Init
 
         Args:
@@ -59,7 +59,7 @@ class ImportantPixelSampler():
         self.lock = mp.Lock()
 
         self.num_samples = num_samples
-        self.weights: Tensor = weights + weights.to(torch.float32) / weights.max() * 0.9 + 0.1
+        self.weights: Tensor = weights.to(torch.float32) / weights.max() * 0.95 + 0.05
         """(shape[H, W]) Weights used for choosing the next samples"""
         self.weights.share_memory_()
 

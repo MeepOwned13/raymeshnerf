@@ -124,7 +124,7 @@ def create_batch_sensor(n: int, radius: float, size: int = 200, fov_x: float = 4
     return mi.load_dict(batch_sensor), extrinsics, focal.astype(np.float32)
 
 
-def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: int = 100, fov_x: float = 40,
+def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: int = 200, fov_x: float = 40,
                 deterministic=False) -> tuple[np.ndarray, np.ndarray, float]:
     """Renders mesh specified by path from multiple angles
 

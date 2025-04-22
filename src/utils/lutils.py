@@ -239,9 +239,9 @@ class LVolume(L.LightningModule):
             rgbs=fine_rgbs, depths=fine_depths, far=far
         )
 
-        if colors.shape[-1] == 4:  # RGBA, apply background noise to ensure 0 density background
+        if colors.shape[-1] == 4:  # RGBA, apply background noise to skew towards low density background
             colors, alphas = colors[..., :3], colors[..., 3:4]
-            noise = torch.empty_like(colors).uniform_(0.35, 0.65)
+            noise = torch.empty_like(colors).uniform_(0.4, 0.6)
 
             mixed_colors = colors * alphas + noise * (1 - alphas)
             mixed_coarse_colors = coarse_colors * coarse_alphas + noise * (1 - coarse_alphas)
@@ -315,7 +315,12 @@ class PixelSamplerUpdateCallback(Callback):
         if trainer and not trainer.sanity_checking:  # Disable image logging on sanity check
             trainer.datamodule.train_rays.update_image_weights()
 
-            weights = [trainer.datamodule.train_rays.data[i][3].weights for i in list(range(8))]
+            idxs = [torch.round(i).to(int).item() for i in torch.linspace(
+                torch.tensor(0),
+                torch.tensor(len(trainer.datamodule.train_rays.data) - 1),
+                steps=8, dtype=torch.float32)
+            ]
+            weights = [trainer.datamodule.train_rays.data[i][3].weights for i in idxs]
             weights = [w / w.max() for w in weights]
             weights = torch.stack(weights, dim=0).unsqueeze(1).expand(-1, 3, -1, -1)
             trainer.logger.experiment.add_image(
