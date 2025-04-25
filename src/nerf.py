@@ -57,7 +57,7 @@ if __name__ == '__main__':
         torch.set_float32_matmul_precision('medium')
 
     data = LU.NeRFData(
-        "Shurtape_Tape_Purple_CP28", batch_size=2**9, epoch_size=2**20, rays_per_image=2**9
+        "checkered_cube", batch_size=2**9, epoch_size=2**21, rays_per_image=2**9, vertical_val_angles=2, horizontal_val_angles=4
     )
     module = LNeRF()
     logger = TensorBoardLogger(".", default_hp_metric=False)

@@ -269,10 +269,11 @@ class LVolume(L.LightningModule):
         cloned_render = render.clone()  # Used for display
         self.val_imgs.append(cloned_render.permute(0, 3, 1, 2))
 
-        if image.shape[-1] == 4:  # Transparency isn't handled well by PSNR, compositing with neutral gray background
-            background = 0.5 * torch.ones_like(render[..., :3])
+        # Transparency isn't handled well by PSNR, compositing with neutral gray background
+        background = 0.5 * torch.ones_like(render[..., :3])
+        render = (render[..., :3] * render[..., 3:4]) + (background * (1 - render[..., 3:4]))
+        if image.shape[-1] == 4:
             image = (image[..., :3] * image[..., 3:4]) + (background * (1 - image[..., 3:4]))
-            render = (render[..., :3] * render[..., 3:4]) + (background * (1 - render[..., 3:4]))
 
         render, image = render.permute(0, 3, 1, 2), image.permute(0, 3, 1, 2)
         psnr = self.psnr(render, image)

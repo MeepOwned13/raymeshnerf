@@ -204,7 +204,7 @@ def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:
     return images, c2ws, focal
 
 
-def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None = None,
+def load_obj_data(obj_name: str, sensor_count: int = 100, directory: str | None = None,
                   verbose: bool = True) -> tuple[Tensor, Tensor, Tensor]:
     """Loads object data from disk, or renders if doesn't exist, follows Google Scanned Objects mesh format
 

@@ -182,7 +182,7 @@ def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: in
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-on', '--object_name', type=str, required=True)
-    parser.add_argument('-sc', '--sensor_count', type=int, default=64)
+    parser.add_argument('-sc', '--sensor_count', type=int, default=100)
     parser.add_argument('-s', '--size', type=int, default=200)
     args = parser.parse_args()
 
