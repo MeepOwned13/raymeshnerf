@@ -231,6 +231,8 @@ def render_rays(rgbs: Tensor, depths: Tensor, far: float) -> tuple[Tensor, Tenso
         - **rgb**: *shape[N, 3]*: RGB value calculated for ray,
         - **depth**: *shape[N]*: Approximated depth of ray termination,
         - **acc**: *shape[N, 1]*: Sum of weights for pixel (alpha)
+        - **alpha**: *shape[N, M]*: Render alpha per sample point
+        - **weights**: *shape[N, M]*: Render weight per sample point
     """
     device = rgbs.device
 
@@ -248,5 +250,5 @@ def render_rays(rgbs: Tensor, depths: Tensor, far: float) -> tuple[Tensor, Tenso
     depth = torch.sum(weights * depths, dim=-1)
     acc = torch.sum(weights, dim=-1).unsqueeze(-1)
 
-    return rgb, depth, acc
+    return rgb, depth, acc, alpha, weights
 

@@ -221,7 +221,7 @@ class LVolume(L.LightningModule):
         image = []
         for o, d in data:
             _, _, rgbs, depths = self.compute_along_rays(o, d, near, far)
-            rgb, _, alpha = rays.render_rays(rgbs=rgbs, depths=depths, far=far)
+            rgb, _, alpha, _, _ = rays.render_rays(rgbs=rgbs, depths=depths, far=far)
             image.append(torch.cat((rgb, alpha), dim=-1))
 
         return torch.cat(image, 0).reshape(height, width, -1)
@@ -232,10 +232,10 @@ class LVolume(L.LightningModule):
         pointers, origins, directions, colors = batch
         coarse_rgbs, coarse_depths, fine_rgbs, fine_depths = self.compute_along_rays(origins, directions)
 
-        coarse_colors, _, coarse_alphas = rays.render_rays(
+        coarse_colors, _, coarse_alphas, _, _ = rays.render_rays(
             rgbs=coarse_rgbs, depths=coarse_depths, far=far
         )
-        fine_colors, _, fine_alphas = rays.render_rays(
+        fine_colors, _, fine_alphas, _, _ = rays.render_rays(
             rgbs=fine_rgbs, depths=fine_depths, far=far
         )
 
