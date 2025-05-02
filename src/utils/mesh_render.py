@@ -75,7 +75,10 @@ def create_batch_sensor(n: int, radius: float, size: int = 200, fov_x: float = 4
         deterministic: If False, modulates view directions a little
 
     Returns:
-        batch_sensor: Mitsuba batch sensor, rendered image is of shape(size, n * size)
+        tuple: tuple containing (images, extrinsics, focal)
+            - **batch_sensor**: Mitsuba batch sensor
+            - **extrinsics**: *shape[sensor_count, 4, 4]*: Extrinsic camera matrices
+            - **focal**: Focal length of cameras
     """
     focal = (size / 2) / np.tan(np.deg2rad(fov_x) / 2)
 
