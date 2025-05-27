@@ -10,7 +10,8 @@ import utils.lutils as LU
 class LNeRF(LU.LVolume):
     def __init__(self, num_layers: int = 8, hidden_size: int = 256, in_coordinates: int = 3, in_directions: int = 3,
                  skips: list[int] = [4], coord_encode_freq: int = 10, dir_encode_freq: int = 4,
-                 coarse_samples: int = 64, fine_samples: int = 128, lr: float = 1e-4, **kwargs):
+                 coarse_samples: int = 64, fine_samples: int = 128, lr: float = 1e-4,
+                 weight_decay: float = 1e-8, **kwargs):
         """Init
 
         Args:
@@ -38,7 +39,8 @@ class LNeRF(LU.LVolume):
         )
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.nerf.parameters(), lr=self.hparams.lr, weight_decay=1e-8)
+        optimizer = torch.optim.Adam(self.nerf.parameters(), lr=self.hparams.lr,
+                                     weight_decay=self.hparams.weight_decay)
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -56,15 +58,18 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('medium')
 
+    L.seed_everything(42)
+    decay = 1e-6
+
     data = LU.NeRFData(
-        "Shurtape_Tape_Purple_CP28", batch_size=2**9, epoch_size=2**20, rays_per_image=2**9
+        "Shurtape_Tape_Purple_CP28", batch_size=2**9, epoch_size=2**20, rays_per_image=2**10
     )
-    module = LNeRF()
-    logger = TensorBoardLogger(".", default_hp_metric=False)
+    module = LNeRF(weight_decay=decay)
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"shurtape200x200_decay={decay:.0e}_exp")
 
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(
-        max_epochs=200, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
+        max_epochs=200, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger, max_steps=22_529,
         gradient_clip_val=1.75, gradient_clip_algorithm="norm",
         callbacks=[
             LU.PixelSamplerUpdateCallback(),
