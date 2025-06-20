@@ -132,7 +132,10 @@ class NeRF(nn.Module):
                 features = torch.cat([features, coordinates], -1)
             features = fc(features)
 
-        sigma = self.sigma_fc(features)
+        # Deviating from original NeRF by treating sigma output as log(sigma) this is done to reduce the magnitude
+        # of weights in sigma_fc as the sigma values (after exp) can reach up to 30-40 in high density areas.
+        # This also makes L2 more effective as the weight regularization becomes more even in the Model.
+        sigma = torch.exp(self.sigma_fc(features))
 
         if skip_colors:
             return sigma
