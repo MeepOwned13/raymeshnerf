@@ -175,3 +175,4 @@ data/*
 !data/tiny_nerf_data.npz
 lightning_logs/
 deprecated_lightning_logs/
+hidden_*
