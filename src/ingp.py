@@ -35,7 +35,7 @@ class LInstantNGP(LU.LVolume):
         """
         super().__init__(coarse_samples=coarse_samples, fine_samples=fine_samples)
         self.save_hyperparameters()
-        self.nerf = U.nn.InstantNGP(
+        self.nerf: U.nn.InstantNGP = U.nn.InstantNGP(
             hidden_size=self.hparams.hidden_size,
             encoding_log2=self.hparams.encoding_log2,
             embed_dims=self.hparams.embed_dims,

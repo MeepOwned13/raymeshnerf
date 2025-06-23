@@ -28,7 +28,7 @@ class LNeRF(LU.LVolume):
         """
         super().__init__(coarse_samples=coarse_samples, fine_samples=fine_samples)
         self.save_hyperparameters()
-        self.nerf = U.nn.NeRF(
+        self.nerf: U.nn.NeRF = U.nn.NeRF(
             num_layers=self.hparams.num_layers,
             hidden_size=self.hparams.hidden_size,
             in_coordinates=self.hparams.in_coordinates,
