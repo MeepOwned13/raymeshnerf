@@ -4,6 +4,23 @@ import torch.nn.functional as F
 from matplotlib import pyplot as plt
 
 
+def intrinsic(focal: Tensor, size: Tensor):
+    """Create intrinsic matrix from focal length and image size
+
+    Args:
+        focal (shape[2]): Focal length in pixels for x and y
+        size (shape[2]): Image width and height
+
+    Returns:
+        intrinsic (shape[3, 3]): Intrinsic camera matrix in homogeneous coordinates
+    """
+    return torch.tensor([
+        [focal[0], 0, size[0] // 2],
+        [0, focal[1], size[1] // 2],
+        [0, 0, 1],
+    ], dtype=torch.float32)
+
+
 def create_rays(height: int, width: int, intrinsic: Tensor, c2w: Tensor) -> tuple[Tensor, Tensor]:
     """Create rays cast by camera in World coordinates
 

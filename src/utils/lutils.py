@@ -204,11 +204,9 @@ class LVolume(L.LightningModule):
         far = self.hparams.get("far", far) or self.trainer.datamodule.hparams.far
         batch_size = self.hparams.get("batch_size", batch_size) or self.trainer.datamodule.hparams.batch_size
 
-        intrinsic = torch.tensor([
-            [focal.item(), 0, width // 2],
-            [0, focal.item(), height // 2],
-            [0, 0, 1],
-        ], dtype=torch.float32, device=self.device)
+        intrinsic = rays.intrinsic(
+            torch.tensor([focal.item(), focal.item()]), torch.tensor([width, height])
+        ).to(self.device)
         origins, directions = rays.create_rays(
             height=height,
             width=width,
