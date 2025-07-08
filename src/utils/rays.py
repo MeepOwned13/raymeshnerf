@@ -4,7 +4,57 @@ import torch.nn.functional as F
 from matplotlib import pyplot as plt
 
 
-def intrinsic(focal: Tensor, size: Tensor):
+# In accordance with mitsuba's conventions
+def look_at(radius: float, theta: Tensor, phi: Tensor) -> Tensor:
+    """Construct Look At matrix for [0, 0, 0] target
+
+    Args:
+        radius: Distance to target, aka. radius of sphere the camera is laying on
+        theta shape([]): Vertical rotation in radians
+        phi shape([]): Horizontal rotation in radians
+
+    Returns:
+        look_at shape([4, 4]): Look at matrix in homogeneous coordinates
+    """
+    origin = torch.tensor([
+        radius * torch.sin(theta) * torch.cos(phi),
+        radius * torch.sin(theta) * torch.sin(phi),
+        radius * torch.cos(theta),
+    ])
+    
+    target = torch.tensor([0,0,0], dtype=torch.float32)
+    forward = F.normalize(origin - target, p="fro", dim=0)
+    up = torch.tensor([0, 0, 1], dtype=torch.float32)
+    right = F.normalize(torch.cross(up, forward, dim=0), p="fro", dim=0)
+    up = F.normalize(torch.cross(forward, right, dim=0), p="fro", dim=0)
+
+    return torch.tensor([
+        [right[0], up[0], forward[0], origin[0]],
+        [right[1], up[1], forward[1], origin[1]],
+        [right[2], up[2], forward[2], origin[2]],
+        [0, 0, 0, 1],
+    ])
+
+
+def equidistance_rotations(n: int) -> tuple[Tensor, Tensor]:
+    """Calculate equidistance rotations along sphere
+    
+    Args:
+        n: Angle count
+    
+    Returns:
+        tuple: tuple containing(phis, thetas)
+            - **phis**: *shape[n]*: Phis - horizontal rotations - in radians
+            - **thetas**: *shape[n]*: Thetas - vertical rotations - in radians
+    """
+    i = torch.arange(0, n, dtype=torch.float32) + 0.5
+    phis = torch.pi * i * (1 + torch.sqrt(torch.tensor(5)))
+    thetas = torch.arccos(1 - 2 * i / n)
+
+    return phis, thetas
+
+
+def intrinsic(focal: Tensor | tuple | list, size: Tensor | tuple | list):
     """Create intrinsic matrix from focal length and image size
 
     Args:
