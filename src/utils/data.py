@@ -26,10 +26,11 @@ def create_nerf_data(image: Tensor, c2w: Tensor, focal: Tensor) -> tuple[Tensor,
         weight_epsilon: Added epsilon for pixel weights
 
     Returns:
-        origins (shape[H, W, 3]): Ray origins in World coordinates
-        directions (shape[H, W, 3]): Cartesian ray directions in World
-        colors (shape[H, W, 3-4]): RGB(A) colors for rays
-        pixel_weights (shape[H, W]): Sampling edge weights for rays
+        tuple: tuple containing (origins, directions, colors, pixel_weights)
+            - **origins**: *shape[H, W, 3]*: Ray origins in World coordinates
+            - **directions**: *shape[H, W, 3]*: Cartesian ray directions in World
+            - **colors**: *shape[H, W, 3-4]*: RGB(A) colors for rays
+            - **pixel_weights**: *shape[H, W]*: Sampling edge weights for rays
     """
     intrinsic = torch.tensor([
         [focal.item(), 0, image.shape[1] // 2],
@@ -55,12 +56,14 @@ class ImportantPixelSampler():
             num_samples: Number of samples to draw per __iter__ (epoch)
             blur_kernel_size: Blur kernel size to use in blur_weights()
             epsilon: Specifies lowest weight/loss to use
+            edge_weights: Weights are edge weights, should be normalized and blurred for initialization
         """
         self.lock = mp.Lock()
 
         self.num_samples = num_samples
-        self.weights: Tensor = weights.to(torch.float32) / weights.max() * 0.95 + 0.05
+        self.weights: Tensor = weights.clone().to(torch.float32)
         """(shape[H, W]) Weights used for choosing the next samples"""
+        self.weights = self.weights / self.weights.max() * 0.95 + 0.05
         self.weights.share_memory_()
 
         self.epsilon: Tensor = torch.tensor(epsilon, dtype=torch.float32)
@@ -73,6 +76,7 @@ class ImportantPixelSampler():
         # Compute 2D Gaussian
         kernel = torch.exp(-(x**2 + y**2) / (2 * sigma**2))
         self.kernel = kernel.unsqueeze(0).unsqueeze(0)
+
         self.blur_weights()
 
     def sample_indices(self):
@@ -95,13 +99,22 @@ class ImportantPixelSampler():
             self.weights[idxs[:, 0], idxs[:, 1]] = errors + self.epsilon
 
     def blur_weights(self):
-        """Applies errors to weights with blurring"""
+        """Blur weights in weight 'image'"""
         with self.lock:
             weights = self.weights.unsqueeze(0).unsqueeze(0)
             blurred_errors = F.conv2d(weights, self.kernel, padding=self.kernel.shape[-1] // 2)
             blurred_errors = blurred_errors.squeeze(0).squeeze(0)
 
             self.weights.copy_(blurred_errors)
+
+    def dump_weights(self):
+        """Return clone of pixel weights"""
+        return self.weights.clone()
+    
+    def load_weights(self, weights):
+        """Load weights"""
+        with self.lock:
+            self.weights.copy_(weights)
 
 
 def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical_partitions: int = 2):
@@ -246,8 +259,7 @@ def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None =
 class RayDataset(IterableDataset):
     """Multiprocessing ready Dataset that samples rays by image, images and rays inside them are weighted"""
 
-    def __init__(self, images: Tensor, c2ws: Tensor, focal: Tensor, rays_per_image: int, length: int,
-                 subpixel_sampling: bool = False):
+    def __init__(self, images: Tensor, c2ws: Tensor, focal: Tensor, rays_per_image: int, length: int):
         """Init
 
         Args:
@@ -255,17 +267,16 @@ class RayDataset(IterableDataset):
             c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
             focal (shape[]): Focal length
             rays_per_image: Samples per image
-            length: Length Ligthning will use for epochs
+            length: Length Lightning will use for epochs
         """
         super(RayDataset, self).__init__()
         self.lock = mp.Lock()
 
         self.rays_per_image = rays_per_image
         self._length = length
-        self.subpixel_sampling = subpixel_sampling
 
         self.data = []
-        for image, c2w in zip(images, c2ws):
+        for i, (image, c2w) in enumerate(zip(images, c2ws)):
             origins, directions, colors, pixel_weights = create_nerf_data(image, c2w, focal)
 
             self.data.append((
@@ -273,8 +284,6 @@ class RayDataset(IterableDataset):
                 directions,
                 colors,
                 ImportantPixelSampler(pixel_weights, num_samples=self.rays_per_image),
-                # Diffs to modulate to subpixel sampling
-                torch.stack([(directions[0, 0] - directions[1, 0]) / 2, (directions[0, 0] - directions[0, 1]) / 2], 0)
             ))
 
         self.image_weights = torch.tensor([d[3].weights.sum() for d in self.data])
@@ -308,22 +317,14 @@ class RayDataset(IterableDataset):
             if not ray_idxs:
                 with self.lock:
                     image_idx = torch.multinomial(self.image_weights, num_samples=1)
-                o, d, c, sampler, diffs = self.data[image_idx.item()]
+                o, d, c, sampler= self.data[image_idx.item()]
                 idxs = sampler.sample_indices()
 
-                # Indexing to allow direction modulation efficiently
+                # Indexing to 1D
                 pointers = torch.cat([image_idx.unsqueeze(0).expand(idxs.shape[0], -1), idxs], dim=-1)
                 origins = o[idxs[:, 0], idxs[:, 1]]
                 directions = d[idxs[:, 0], idxs[:, 1]]
                 colors = c[idxs[:, 0], idxs[:, 1]]
-
-                # Direction modulation for subpixel sampling
-                if self.subpixel_sampling:
-                    modulation = torch.rand([idxs.shape[0], 2, 1], dtype=torch.float32) - 0.5
-                    modulation = torch.sum(modulation * diffs.unsqueeze(0), 1)
-                    directions = F.normalize(
-                        directions + modulation, "fro", -1
-                    )
 
                 ray_idxs = deque(list(range(idxs.shape[0])))
 
@@ -351,6 +352,23 @@ class RayDataset(IterableDataset):
             for i in range(len(self.data)):
                 sampler = self.data[i][3]
                 self.image_weights[i] = sampler.weights.sum()
+
+    def dump_weights(self) -> list[Tensor]:
+        """Return sampler weights as a stacked tensor
+        
+        Returns:
+            sampler_weights ([N, H, W]): Sampler weights per image
+        """
+        return torch.stack([s.dump_weights() for _, _, _, s in self.data], dim=0)
+    
+    def load_weights(self, sampler_weights: Tensor):
+        """Return sampler weights as a stacked tensor
+
+        Args:
+            sampler_weights (shape[N, H, W]): Sampler weights per image
+        """
+        for (_, _, _, s), w in zip(self.data, sampler_weights):
+            s.load_weights(w)
 
     @staticmethod
     def disable_multiprocessing_length_warning():

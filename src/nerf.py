@@ -62,22 +62,24 @@ if __name__ == '__main__':
     decay = 1e-6
 
     data = LU.NeRFData(
-        "Shurtape_Tape_Purple_CP28", batch_size=2**9, epoch_size=2**20, rays_per_image=2**10
+        "Weisshai_Great_White_Shark", batch_size=2**9, epoch_size=2**20, rays_per_image=2**10
     )
     module = LNeRF(weight_decay=decay)
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"shurtape200x200_decay={decay:.0e}_exp")
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"SADweisshai_shark200x200_decay={decay:.0e}")
 
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(
-        max_epochs=200, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger, max_steps=22_529,
-        gradient_clip_val=1.75, gradient_clip_algorithm="norm",
+        max_epochs=40, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
         callbacks=[
             LU.PixelSamplerUpdateCallback(),
             LearningRateMonitor(logging_interval="epoch"),
-            ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1),
-            ModelCheckpoint(filename="best_train_loss_{step}", monitor="train_loss", mode="min"),
-            ModelCheckpoint(filename="{epoch}", every_n_epochs=1),
+            ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1,
+                            save_weights_only=True),
+            ModelCheckpoint(filename="end_{epoch}", save_on_train_epoch_end=True, every_n_epochs=1),
         ],
     )
 
-    trainer.fit(model=module, datamodule=data)
+    trainer.fit(
+        model=module, datamodule=data,
+        ckpt_path=None
+    )

@@ -3,7 +3,8 @@ from torch import Tensor
 from torch.nn import MSELoss
 from torchvision.utils import make_grid
 from torch.utils.data import TensorDataset, DataLoader
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure, LearnedPerceptualImagePatchSimilarity
+from torchmetrics.functional.image import peak_signal_noise_ratio, structural_similarity_index_measure,\
+    learned_perceptual_image_patch_similarity
 import lightning as L
 from lightning.pytorch.callbacks import Callback
 import random
@@ -27,16 +28,16 @@ def w_init_fn(worker_id):
 
 class NeRFData(L.LightningDataModule):
     def __init__(self, object_name: str, batch_size: int = 1024, horizontal_val_angles: int = 4,
-                 vertical_val_angles: int = 3, epoch_size: int = 2**20, rays_per_image: int = 2**12,
-                 subpixel_sampling: bool = False):
+                 vertical_val_angles: int = 3, epoch_size: int = 2**20, rays_per_image: int = 2**12):
         """Init
 
         Args:
-            path: Path to data file
-            batch_size: Batch size and epoch size
+            object_name: Name of object in data directory
+            batch_size: #Rays in a batch
             horizontal_val_angles: #angles to take for validation horizontally
             vertical_val_angles: #angles to take for validation vertically
-            swap_strategy_iter: Specifies at which iteration Squared Error sampling takes over fully per image
+            epoch_size: #Rays in a single epoch
+            rays_per_image: Consecutive #Rays to sample from an image
         """
         super().__init__()
         self.save_hyperparameters()
@@ -68,7 +69,6 @@ class NeRFData(L.LightningDataModule):
                 focal=torch.tensor(self.hparams.focal, dtype=torch.float32),
                 rays_per_image=self.hparams.rays_per_image,
                 length=self.hparams.epoch_size,
-                subpixel_sampling=self.hparams.subpixel_sampling,
             )
             """Dataset: (pointers, origins, directions, colors)"""
 
@@ -98,6 +98,14 @@ class NeRFData(L.LightningDataModule):
             persistent_workers=True,
             worker_init_fn=w_init_fn
         )
+    
+    def state_dict(self):
+        return {
+            "pixel_weights": self.train_rays.dump_weights()
+        }
+    
+    def load_state_dict(self, state_dict):
+        self.train_rays.load_weights(state_dict["pixel_weights"].cpu())
 
 
 class LVolume(L.LightningModule):
@@ -117,9 +125,6 @@ class LVolume(L.LightningModule):
             raise NotImplementedError(f"{self.__class__} must have .nerf attribute defined")
         if stage == "fit":
             self.lossf = MSELoss(reduction='none')
-            self.psnr = PeakSignalNoiseRatio()
-            self.ssim = StructuralSimilarityIndexMeasure()
-            self.lpips = LearnedPerceptualImagePatchSimilarity()
         return super().setup(stage)
 
     def compute_along_rays(self, origins: Tensor, directions: Tensor, near: float | None = None,
@@ -253,7 +258,8 @@ class LVolume(L.LightningModule):
 
         iters = 0
         while iters < max_iters:
-            # Masking to save computation time (really effective at steps above (farplane-nearplane)/non_grad_step_size)
+            # Masking to save computation time (really effective at steps above (farplane-nearplane)/non_grad_step_size,
+            #   as empty space gets explored in that many steps)
             masked_origins, masked_directions = origins[in_progress_mask], directions[in_progress_mask]
 
             # Depth needs masked cloning and detach first to avoid reference to full depth array
@@ -273,7 +279,7 @@ class LVolume(L.LightningModule):
             step_size[~grad_step] = non_grad_step_size
 
             # Stepping stops if:
-            # - gradient falls below limit (and this step used the gradient!), as the surface point depth estimate is found
+            # - gradient falls below limit (and this step used the gradient!), surface point depth estimate is found
             # - depth goes beyond the far plane
             mask_update = ((grad.abs() >= grad_epsilon) | ~grad_step).squeeze(-1) &\
                         (masked_depth < self.hparams.far).squeeze(-1)
@@ -333,14 +339,14 @@ class LVolume(L.LightningModule):
         self.val_imgs.append(cloned_render.permute(0, 3, 1, 2))
 
         if image.shape[-1] == 4:  # Transparency isn't handled well by PSNR, compositing with neutral gray background
-            background = 0.5 * torch.ones_like(render[..., :3])
+            background = torch.full_like(render[..., :3], 0.5)
             image = (image[..., :3] * image[..., 3:4]) + (background * (1 - image[..., 3:4]))
             render = (render[..., :3] * render[..., 3:4]) + (background * (1 - render[..., 3:4]))
 
         render, image = render.permute(0, 3, 1, 2), image.permute(0, 3, 1, 2)
-        psnr = self.psnr(render, image)
-        ssim = self.ssim(render, image)
-        lpips = self.lpips(render, image)
+        psnr = peak_signal_noise_ratio(render, image, data_range=(0.0, 1.0))
+        ssim = structural_similarity_index_measure(render, image, data_range=(0.0, 1.0))
+        lpips = learned_perceptual_image_patch_similarity(render, image, normalize=True)
         metrics = {"val_psnr": psnr, "val_ssim": ssim, "val_lpips": lpips}
         self.log_dict(metrics, prog_bar=True, on_epoch=True, on_step=False)
         return metrics
@@ -353,12 +359,6 @@ class LVolume(L.LightningModule):
 
     def configure_optimizers(self):
         raise NotImplementedError("configure_optimizers must be overwritten in subclass")
-    
-    def on_save_checkpoint(self, checkpoint):
-        keys = [k for k in checkpoint["state_dict"].keys() if "lpips" in k]
-        for k in keys:
-            del checkpoint["state_dict"][k]
-        return super().on_save_checkpoint(checkpoint)
 
 
 class OGFilterCallback(Callback):
