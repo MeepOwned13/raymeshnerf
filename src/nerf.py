@@ -65,7 +65,7 @@ if __name__ == '__main__':
         "Weisshai_Great_White_Shark", batch_size=2**9, epoch_size=2**20, rays_per_image=2**10
     )
     module = LNeRF(weight_decay=decay)
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"SADweisshai_shark200x200_decay={decay:.0e}")
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"weisshai_shark200x200_decay={decay:.0e}")
 
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(
