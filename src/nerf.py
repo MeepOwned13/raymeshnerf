@@ -45,7 +45,7 @@ class LNeRF(LU.LVolume):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    optimizer, min_lr=1e-6, factor=0.7, patience=2, mode="max", cooldown=2
+                    optimizer, min_lr=1e-6, factor=0.7, patience=2, mode="max", cooldown=1
                 ),
                 "interval": "epoch",
                 "frequency": 1,
@@ -59,17 +59,18 @@ if __name__ == '__main__':
         torch.set_float32_matmul_precision('medium')
 
     L.seed_everything(42)
-    decay = 1e-6
+    decay = 5e-7
 
     data = LU.NeRFData(
-        "Weisshai_Great_White_Shark", batch_size=2**9, epoch_size=2**20, rays_per_image=2**10
+        "Weisshai_Great_White_Shark", batch_size=2**9, epoch_size=2**22, rays_per_image=2**10
     )
     module = LNeRF(weight_decay=decay)
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"weisshai_shark200x200_decay={decay:.0e}")
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"weisshai_shark300x300_decay={decay:.0e}")
 
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(
-        max_epochs=40, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
+        max_epochs=15, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
+        gradient_clip_val=2.0, gradient_clip_algorithm="norm",
         callbacks=[
             LU.PixelSamplerUpdateCallback(),
             LearningRateMonitor(logging_interval="epoch"),
