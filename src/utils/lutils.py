@@ -9,6 +9,7 @@ import lightning as L
 from lightning.pytorch.callbacks import Callback
 import random
 import numpy as np
+import warnings
 
 from . import data, rays
 
@@ -231,7 +232,8 @@ class LVolume(L.LightningModule):
     
     def locate_density_gradient_based_surface_depth(
         self, origins: Tensor, directions: Tensor, sigma_limit: float = 5.0, gamma: float = 5e-6,
-        non_grad_step_size: float = 3e-2, grad_epsilon: float = 5e-2, max_iters: int = 300
+        non_grad_step_size: float = 3e-2, grad_epsilon: float = 5e-2, max_iters: int = 300,
+        silence_input_size_warning: bool = False
     ) -> tuple[Tensor, Tensor]:
         """Main algorithm of RayMeshNerf, finds surface point depth using gradient ascent
         
@@ -243,6 +245,7 @@ class LVolume(L.LightningModule):
             non_grad_step_size: Step size when sigma is below limit
             grad_epsilon: If the magnitude of the gradient falls below this, we found depth for the surface point
             max_iters: Limit for iteration count
+            silence_input_size_warning: Silence the warning associated with input count being over 2^19 for GPU
 
         Returns:
             tuple: tuple containing (depths, finish_mask)
@@ -252,6 +255,17 @@ class LVolume(L.LightningModule):
                 (2) depth exceeds Model's far plane
         """
         shape = origins.shape[:-1]
+
+        total_count = torch.prod(torch.tensor(shape)).item()
+        if total_count > 2**19 and self.device != torch.device('cpu') and not silence_input_size_warning:
+            warnings.warn(
+                f"Total input count over {2**19} ({total_count}). This may cause inconsistencies with CUDA and ROCM "
+                "implementations, resulting in the model returning the same numbers for points beyond the limit "
+                "and thus calculating incorrect depths. Make sure to batch input to at most 2^19 chunks",
+                category=UserWarning,
+                stacklevel=2  # Shows the caller's line in the warning
+            )
+
         depth = torch.full(shape + (1,), self.hparams.near, dtype=torch.float32, device=self.device)
         in_progress_mask = torch.ones(shape, dtype=torch.bool, device=self.device)
         origins, directions = origins.to(self.device), directions.to(self.device)
