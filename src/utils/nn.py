@@ -110,14 +110,14 @@ class NeRF(nn.Module):
         )
         """Linear layers for RGB calculation"""
 
-    def forward(self, coordinates: Tensor, directions: Tensor, skip_colors: bool = False) -> Tensor:
+    def forward(self, coordinates: Tensor, directions: Tensor | None, skip_colors: bool = False) -> Tensor:
         """Perform RGBS calculation
 
         coordinates and directions must have the same dimensions for *...
 
         Args:
             coordinates (shape[..., in_coordinates]): Input point coordinates
-            directions (shape[..., in_directions]): Input directions
+            directions (shape[..., in_directions]): Input directions, may be omitted if skip_colors=True is passed
             skip_colors: Skip color calculation?
 
         Returns:
@@ -125,6 +125,9 @@ class NeRF(nn.Module):
                 - **rgbs**: *shape[..., 4]*: RGB&Sigma
                 - **sigma**: *shape[...]*: Sigma
         """
+        if directions is None and not skip_colors:
+            raise ValueError("directions has to be passed if skip_colors=False")
+
         coordinates = self.coordinate_encoder(coordinates)
         features = coordinates
         for i, fc in enumerate(self.feature_mlp):

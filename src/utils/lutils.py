@@ -308,6 +308,37 @@ class LVolume(L.LightningModule):
             iters += 1
 
         return depth, ~in_progress_mask
+    
+    def estimate_normals(self, points: torch.Tensor, silence_input_size_warning: bool = False) -> torch.Tensor:
+        """Estimate normals from points as the direction of largest negative gradient
+        
+        Args:
+            points (shape[N, 3]): XYZ coordinates of points
+            silence_input_size_warning: Silence the warning associated with input count being over 2^19 for GPU
+
+        Returns:
+            normals (shape[N, 3]): Estimated normal vectors
+        """
+
+        total_count = torch.prod(torch.tensor(points.shape)).item()
+        if total_count > 2**19 and self.device != torch.device('cpu') and not silence_input_size_warning:
+            warnings.warn(
+                f"Total input count over {2**19} ({total_count}). This may cause inconsistencies with CUDA and ROCM "
+                "implementations, resulting in the model returning the same numbers for points beyond the limit "
+                "and thus calculating incorrect depths. Make sure to batch input to at most 2^19 chunks",
+                category=UserWarning,
+                stacklevel=2  # Shows the caller's line in the warning
+            )
+
+        coords: torch.Tensor = points.clone().to(self.device)
+        coords.requires_grad = True
+        coords.retain_grad()
+
+        sigmas = self.nerf(coords, None, skip_colors=True)
+        sigmas.backward(torch.ones_like(sigmas))
+
+        normals = -torch.nn.functional.normalize(coords.grad, p="fro", dim=-1)
+        return normals
 
     def training_step(self, batch, batch_idx):
         far = self.hparams.get("far", None) or self.trainer.datamodule.hparams.far
