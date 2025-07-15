@@ -7,6 +7,8 @@ from torchmetrics.functional.image import peak_signal_noise_ratio, structural_si
     learned_perceptual_image_patch_similarity
 import lightning as L
 from lightning.pytorch.callbacks import Callback
+from lightning.pytorch.plugins import TorchCheckpointIO
+import re
 import random
 import numpy as np
 import warnings
@@ -419,10 +421,28 @@ class OGFilterCallback(Callback):
 
 
 class PixelSamplerUpdateCallback(Callback):
-    def on_validation_epoch_end(self, trainer, pl_module):
-        if trainer and not trainer.sanity_checking:  # Disable image logging on sanity check
+    def __init__(self, per_steps: int | None = None):
+        """Updates pixel sampler on_validation_epoch_end and logs 8 pixel weight images to Tensorboard
+        
+        Args:
+            per_steps: If specified, update happens after the specified steps (without logging)
+        """
+        super().__init__()
+        self.per_steps = per_steps
+
+    def update_image_weights(self, trainer):
+        if trainer and not trainer.sanity_checking:  # Disable update on sanity check
             trainer.datamodule.train_rays.update_image_weights()
 
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if self.per_steps and (trainer.global_step % self.per_steps) == 0:
+            self.update_image_weights(trainer)
+        return super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        self.update_image_weights(trainer)
+
+        if trainer and not trainer.sanity_checking:  # Disable image logging on sanity check
             idxs = [torch.round(i).to(int).item() for i in torch.linspace(
                 torch.tensor(0),
                 torch.tensor(len(trainer.datamodule.train_rays.data) - 1),
@@ -435,3 +455,22 @@ class PixelSamplerUpdateCallback(Callback):
                 "Sample weights", make_grid(weights, nrow=4, padding=5), trainer.global_step
             )
         return super().on_validation_epoch_end(trainer, pl_module)
+    
+
+class RemoveCheckpointKeyBasedOnPathCheckpointPlugin(TorchCheckpointIO):
+    def __init__(self, trim_file_contains: str, delkey: str):
+        """Deletes the key specified by 'delkey' on checkpoint files which contain 'trim_file_contains'
+        
+        Args:
+            trim_file_contains: String that files which need trimming contain
+            delkey: Which key to delete from checkpoint, e.g. 'NeRFData' results in pixel weights being trimmed
+        """
+        super().__init__()
+        self.trim_file_contains = trim_file_contains
+        self.delkey = delkey
+
+    def save_checkpoint(self, checkpoint, path, storage_options = None):
+        if re.match(fr".*/[^/]*{self.trim_file_contains}[^/]*", path):
+            del checkpoint[self.delkey]
+
+        return super().save_checkpoint(checkpoint, path, storage_options)
