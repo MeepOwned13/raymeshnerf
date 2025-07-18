@@ -123,7 +123,7 @@ class NeRF(nn.Module):
         Returns:
             Tensor: RGBS (skip_colors=True) or Sigma (skip_colors=False)
                 - **rgbs**: *shape[..., 4]*: RGB&Sigma
-                - **sigma**: *shape[...]*: Sigma
+                - **sigma**: *shape[..., 1]*: Sigma
         """
         if directions is None and not skip_colors:
             raise ValueError("directions has to be passed if skip_colors=False")
@@ -181,31 +181,30 @@ class SphericalHarmonicsBasisEncoding(nn.Module):
 
         pi = torch.tensor([torch.pi], dtype=torch.float32, device=input.device)
         x, y, z = input[..., 0], input[..., 1], input[..., 2]
-        r = torch.sqrt(x**2 + y**2 + z**2)
 
         if self.degree >= 0:
-            encoded[..., 0] = 0.5 * torch.sqrt(1 / pi)
+            encoded[..., 0] = 0.282094791773878
 
         if self.degree >= 1:
-            encoded[..., 1] = torch.sqrt(3 / (4 * pi)) * y / r
-            encoded[..., 2] = torch.sqrt(3 / (4 * pi)) * z / r
-            encoded[..., 3] = torch.sqrt(3 / (4 * pi)) * x / r
+            encoded[..., 1] = -0.48860251190292 * y
+            encoded[..., 2] = 0.48860251190292 * z
+            encoded[..., 3] = -0.48860251190292 * x
 
         if self.degree >= 2:
-            encoded[..., 4] = 1 / 2 * torch.sqrt(15 / pi) * (x * y) / r**2
-            encoded[..., 5] = 1 / 2 * torch.sqrt(15 / pi) * (y * z) / r**2
-            encoded[..., 6] = 1 / 4 * torch.sqrt(5 / pi) * (3 * z**2 - r**2) / r**2
-            encoded[..., 7] = 1 / 2 * torch.sqrt(15 / pi) * (x * z) / r**2
-            encoded[..., 8] = 1 / 2 * torch.sqrt(15 / pi) * (x**2 - y**2) / r**2
+            encoded[..., 4] = 1.09254843059208 * x * y
+            encoded[..., 5] = -1.09254843059208 * y * z
+            encoded[..., 6] = 0.94617469575756 * z ** 2 - 0.31539156525252
+            encoded[..., 7] = -1.09254843059208 * x * z
+            encoded[..., 8] = 0.54627421529604 * x ** 2 - 0.54627421529604 * y ** 2
 
         if self.degree >= 3:
-            encoded[..., 9] = 1 / 4 * torch.sqrt(35 / (2 * pi)) * y * (3 * x**2 - y**2) / r**3
-            encoded[..., 10] = 1 / 2 * torch.sqrt(105 / pi) * (x * y * z) / r**3
-            encoded[..., 11] = 1 / 4 * torch.sqrt(21 / (2 * pi)) * y * (5 * z**2 - r**2) / r**3
-            encoded[..., 12] = 1 / 4 * torch.sqrt(7 / pi) * z * (5 * z**2 - 3 * r**2) / r**3
-            encoded[..., 13] = 1 / 4 * torch.sqrt(21 / (2 * pi)) * x * (5 * z**2 - r**2) / r**3
-            encoded[..., 14] = 1 / 4 * torch.sqrt(105 / pi) * z * (x**2 - y**2) / r**3
-            encoded[..., 15] = 1 / 4 * torch.sqrt(35 / (2 * pi)) * x * (x**2 - 3 * y**2) / r**3
+            encoded[..., 9] = -0.590043589926644 * y * (3.0 * x ** 2 - y ** 2)
+            encoded[..., 10] = 2.89061144264055 * x * y * z
+            encoded[..., 11] = 0.304697199642977 * y * (1.5 - 7.5 * z ** 2)
+            encoded[..., 12] = 1.24392110863372 * z * (1.5 * z ** 2 - 0.5) - 0.497568443453487 * z
+            encoded[..., 13] = 0.304697199642977 * x * (1.5 - 7.5 * z ** 2)
+            encoded[..., 14] = 1.44530572132028 * z * (x ** 2 - y ** 2)
+            encoded[..., 15] = -0.590043589926644 * x * (x ** 2 - 3.0 * y ** 2)
 
         return encoded
 
@@ -216,8 +215,6 @@ class SphericalHarmonicsBasisEncoding(nn.Module):
 
 
 class InstantNGP(nn.Module):
-    """InstantNGP implementation using MLHHE from https://github.com/cheind"""
-
     def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
                  min_res: int = 32, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128,
                  f_sigma_init: float = 0.04, f_sigma_threshold: float = 0.01, f_stochastic_test: bool = True,
@@ -267,6 +264,8 @@ class InstantNGP(nn.Module):
         self.feature_mlp = nn.Sequential(
             nn.Linear(levels * embed_dims, hidden_size),
             nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, hidden_size), 
+            nn.ReLU(inplace=True),
             nn.Linear(hidden_size, 16),  # index 0 is log density
         )
         """MLP processing encoded coordinates, output at index 0 is log of sigma"""
@@ -278,6 +277,8 @@ class InstantNGP(nn.Module):
 
         self.rgb_mlp = nn.Sequential(
             nn.Linear(16 + 16, hidden_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, hidden_size),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(inplace=True),
@@ -300,7 +301,7 @@ class InstantNGP(nn.Module):
         Returns:
             Tensor: RGBS (skip_colors=True) or Sigma (skip_colors=False)
                 - **rgbs**: *shape[..., 4]*: RGB&Sigma
-                - **sigma**: *shape[...]*: Sigma
+                - **sigma**: *shape[..., 1]*: Sigma
         """
         device = coordinates.device
         out_shape = list(coordinates.shape[:-1])
@@ -319,7 +320,7 @@ class InstantNGP(nn.Module):
         sigma[mask] = torch.exp(features[..., 0:1])
 
         if skip_colors:
-            return sigma.squeeze(-1).reshape(out_shape)
+            return sigma.reshape(out_shape + [1])
 
         directions = directions.reshape(-1, 3)
         features = torch.cat([

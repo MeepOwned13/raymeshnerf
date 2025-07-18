@@ -113,7 +113,7 @@ class OccupancyGridFilter(torch.nn.Module):
         xyz = ijk + noise
         xyz_ndc = (xyz + 0.5) * 2 / self.res - 1.0
 
-        d = nerf(xyz_ndc, directions=None, skip_colors=True, masked=False)
+        d = nerf(xyz_ndc, directions=None, skip_colors=True, masked=False).squeeze(-1)
         cur = self.grid[ijk[:, 2], ijk[:, 1], ijk[:, 0]]
         new = torch.maximum(d, cur)
         self.grid[ijk[:, 2], ijk[:, 1], ijk[:, 0]] = new

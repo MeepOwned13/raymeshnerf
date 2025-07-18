@@ -1,7 +1,7 @@
 import torch
 import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 
 import utils as U
 import utils.lutils as LU
@@ -9,10 +9,10 @@ import utils.lutils as LU
 
 class LInstantNGP(LU.LVolume):
     def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
-                 min_res: int = 16, max_res: int = 2048, max_res_dense: int = 256, f_res: int = 128,
+                 min_res: int = 16, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128,
                  f_sigma_init: float = 0.04, f_sigma_threshold: float = 0.01, f_stochastic_test: bool = True,
                  f_update_decay: float = 0.7, f_update_noise_scale: float = None, f_update_selection_rate: float = 0.25,
-                 coarse_samples: int = 64, fine_samples: int = 128, **kwargs):
+                 coarse_samples: int = 128, fine_samples: int = 128, **kwargs):
         """Init
 
         Args:
@@ -52,22 +52,21 @@ class LInstantNGP(LU.LVolume):
             f_update_selection_rate=self.hparams.f_update_selection_rate,
         )
 
+        self.background_noise_range = [0.0, 1.0]
+
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam([
+        optimizer = torch.optim.RAdam([
             {"params": self.nerf.mlhhe.parameters(), "weight_decay": 0.},
-            {"params": self.nerf.rgb_mlp.parameters(), "weight_decay": 10**-6},
-            {"params": self.nerf.feature_mlp.parameters(), "weight_decay": 10**-6}
-        ], lr=1e-2, betas=(0.9, 0.99), eps=1e-15)
+            {"params": self.nerf.rgb_mlp.parameters(), "weight_decay": 10**-6, "eps": 1e-15},
+            {"params": self.nerf.feature_mlp.parameters(), "weight_decay": 10**-6, "eps": 1e-15}
+        ], lr=1e-2, betas=(0.9, 0.99))
 
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    optimizer, min_lr=1e-4, factor=0.75, patience=2, mode="max"
+                "scheduler": torch.optim.lr_scheduler.ExponentialLR(
+                    optimizer, gamma=0.6
                 ),
-                "interval": "epoch",
-                "frequency": 1,
-                "monitor": "val_psnr",
             }
         }
 
@@ -76,24 +75,31 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('medium')
 
+    L.seed_everything(42)
+
     data = LU.NeRFData(
-        "Weisshai_Great_White_Shark", batch_size=2**12, epoch_size=2**22, rays_per_image=2**12,
+        "Weisshai_Great_White_Shark", batch_size=2**12, epoch_size=2**20, rays_per_image=2**9,
     )
     module = LInstantNGP()
-    logger = TensorBoardLogger(".", default_hp_metric=False)
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_b_weisshai_shark400x400")
 
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(
-        max_epochs=200, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
-        accumulate_grad_batches=2**8,
+        max_epochs=20, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
         callbacks=[
-            LU.OGFilterCallback(2**14 // data.hparams.batch_size),
-            LU.PixelSamplerUpdateCallback(),
+            LU.OGFilterCallback(16),
+            LU.PixelSamplerUpdateCallback(64),
             LearningRateMonitor(logging_interval="epoch"),
-            ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1),
-            ModelCheckpoint(filename="best_train_loss_{step}", monitor="train_loss", mode="min"),
-            ModelCheckpoint(filename="{epoch}", every_n_epochs=1),
+            ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1,
+                            save_weights_only=True),
+            ModelCheckpoint(filename="end_{epoch}", save_on_train_epoch_end=True, every_n_epochs=1),
+            EarlyStopping(monitor="val_psnr", mode="max", patience=1, min_delta=0.05)
         ],
+        plugins=[
+            LU.RemoveCheckpointKeyBasedOnPathCheckpointPlugin("val_psnr", "NeRFData")
+        ]
     )
 
-    trainer.fit(model=module, datamodule=data)
+    trainer.fit(
+        model=module, datamodule=data
+    )
