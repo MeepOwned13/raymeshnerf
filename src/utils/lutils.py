@@ -87,7 +87,8 @@ class NeRFData(L.LightningDataModule):
             dataset=self.train_rays,
             batch_size=self.hparams.batch_size,
             shuffle=False,
-            num_workers=4,
+            num_workers=6,
+            prefetch_factor=6,
             persistent_workers=True,
             worker_init_fn=w_init_fn,
         )
@@ -98,6 +99,7 @@ class NeRFData(L.LightningDataModule):
             batch_size=1,
             shuffle=False,
             num_workers=2,
+            prefetch_factor=2,
             persistent_workers=True,
             worker_init_fn=w_init_fn
         )
@@ -122,6 +124,8 @@ class LVolume(L.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.nerf: torch.nn.Module = None
+
+        self.background_noise_range = [0.4, 0.6]
 
     def setup(self, stage):
         if self.nerf is None:
@@ -230,7 +234,7 @@ class LVolume(L.LightningModule):
             rgb, _, alpha, _, _ = rays.render_rays(rgbs=rgbs, depths=depths, far=far)
             image.append(torch.cat((rgb, alpha), dim=-1))
 
-        return torch.cat(image, 0).reshape(height, width, -1)
+        return torch.cat(image, 0).reshape(height, width, -1).clamp(0.0, 1.0)
     
     def locate_density_gradient_based_surface_depth(
         self, origins: Tensor, directions: Tensor, sigma_limit: float = 5.0, gamma: float = 5e-6,
@@ -357,7 +361,7 @@ class LVolume(L.LightningModule):
 
         if colors.shape[-1] == 4:  # RGBA, apply background noise to skew towards low density background
             colors, alphas = colors[..., :3], colors[..., 3:4]
-            noise = torch.empty_like(colors).uniform_(0.4, 0.6)
+            noise = torch.empty_like(colors).uniform_(self.background_noise_range[0], self.background_noise_range[1])
 
             mixed_colors = colors * alphas + noise * (1 - alphas)
             mixed_coarse_colors = coarse_colors * coarse_alphas + noise * (1 - coarse_alphas)
