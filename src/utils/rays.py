@@ -124,7 +124,7 @@ def sobel_filter(images: Tensor) -> Tensor:
     """
     # Sobel-Feldman operator
     filter = nn.Conv2d(in_channels=1, out_channels=2, kernel_size=3, stride=1,
-                       padding=1, padding_mode='zeros', bias=False, dtype=torch.float32)
+                       padding=1, padding_mode='replicate', bias=False, dtype=torch.float32)
     gx = torch.tensor([
         [3.0, 0.0, -3.0],
         [10.0, 0.0, -10.0],
