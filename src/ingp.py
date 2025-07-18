@@ -81,7 +81,7 @@ if __name__ == '__main__':
         "Weisshai_Great_White_Shark", batch_size=2**12, epoch_size=2**20, rays_per_image=2**9,
     )
     module = LInstantNGP()
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_b_weisshai_shark400x400")
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_weisshai_shark400x400")
 
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(
