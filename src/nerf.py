@@ -59,12 +59,12 @@ if __name__ == '__main__':
         torch.set_float32_matmul_precision('medium')
 
     L.seed_everything(42)
-    decay = 5e-7
+    decay = 1e-6
 
     data = LU.NeRFData(
         "Weisshai_Great_White_Shark", batch_size=2**9, epoch_size=2**22, rays_per_image=2**10
     )
-    module = LNeRF(weight_decay=decay)
+    module = LNeRF(weight_decay=decay, coarse_samples=128)
     logger = TensorBoardLogger(".", default_hp_metric=False, version=f"weisshai_shark300x300_decay={decay:.0e}")
 
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
@@ -72,12 +72,15 @@ if __name__ == '__main__':
         max_epochs=15, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
         gradient_clip_val=2.0, gradient_clip_algorithm="norm",
         callbacks=[
-            LU.PixelSamplerUpdateCallback(),
+            LU.PixelSamplerUpdateCallback(2**10),
             LearningRateMonitor(logging_interval="epoch"),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1,
                             save_weights_only=True),
             ModelCheckpoint(filename="end_{epoch}", save_on_train_epoch_end=True, every_n_epochs=1),
         ],
+        plugins=[
+            LU.RemoveCheckpointKeyBasedOnPathCheckpointPlugin("val_psnr", "NeRFData")
+        ]
     )
 
     trainer.fit(
