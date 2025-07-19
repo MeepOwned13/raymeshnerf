@@ -10,8 +10,8 @@ def look_at(radius: float, theta: Tensor, phi: Tensor) -> Tensor:
 
     Args:
         radius: Distance to target, aka. radius of sphere the camera is laying on
-        theta shape([]): Vertical rotation in radians
-        phi shape([]): Horizontal rotation in radians
+        theta (shape[]): Vertical rotation in radians
+        phi (shape[]): Horizontal rotation in radians
 
     Returns:
         look_at shape([4, 4]): Look at matrix in homogeneous coordinates
