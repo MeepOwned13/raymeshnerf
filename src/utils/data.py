@@ -155,10 +155,10 @@ def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical
 
 
 def compute_near_far_planes(c2ws: Tensor) -> tuple[float, float]:
-    """Compute minimal near and maximal far plane
+    """Compute minimal near and maximal far plane for ray sampling
 
-    Transforms the box bounded by -1 to 1 in World coordinates to camera
-    and finds the minimal near plane and maximal far plane based on distance
+    Computes minimal and maximal distance to [-1, 1] bbox corners by first computing distance to origins based on
+    camera to world transformations and then adds/removes sqrt(3) from it (min-max distance to bbox corner from center)
 
     Args:
         c2ws (shape[K, 4, 4]): Extrinsic camera matrices (Camera to World)
@@ -168,32 +168,16 @@ def compute_near_far_planes(c2ws: Tensor) -> tuple[float, float]:
         - **near_plane**: Minimal near plane found
         - **far_plane**: Maximal far plane found
     """
-    scene_bounds_min = torch.tensor([-1, -1, -1], dtype=torch.float32)
-    scene_bounds_max = torch.tensor([1, 1, 1], dtype=torch.float32)
+    distance_from_center = c2ws[:, :3, -1].norm(dim=-1)
+    max_dfc = distance_from_center.max()
+    min_dfc = distance_from_center.min()
 
-    # Transform bounding box corners to camera coordinates
-    corners = torch.tensor([
-        [scene_bounds_min[0], scene_bounds_min[1], scene_bounds_min[2]],
-        [scene_bounds_min[0], scene_bounds_min[1], scene_bounds_max[2]],
-        [scene_bounds_min[0], scene_bounds_max[1], scene_bounds_min[2]],
-        [scene_bounds_min[0], scene_bounds_max[1], scene_bounds_max[2]],
-        [scene_bounds_max[0], scene_bounds_min[1], scene_bounds_min[2]],
-        [scene_bounds_max[0], scene_bounds_min[1], scene_bounds_max[2]],
-        [scene_bounds_max[0], scene_bounds_max[1], scene_bounds_min[2]],
-        [scene_bounds_max[0], scene_bounds_max[1], scene_bounds_max[2]],
-    ])
+    # Distance to box corner is maximal at sqrt(3) for [-1, 1] bbox
+    near = min_dfc - torch.sqrt(torch.tensor(3))
+    far = max_dfc + torch.sqrt(torch.tensor(3))
 
-    nears, fars = [], []
-    for c2w in c2ws:
-        corners_camera = (c2w[:3, :3] @ corners.T).T + c2w[:3, -1]
-        distances = torch.norm(corners_camera, "fro", dim=1)
-        nears.append(torch.min(distances))
-        fars.append(torch.max(distances))
-
-    near_plane = min(distances) * 0.9  # Slightly smaller than the closest point
-    far_plane = max(distances) * 1.1  # Slightly larger than the farthest point
-
-    return near_plane.item(), far_plane.item()
+    # Multiply a little bit extra to make sure ray can hit everything needed in box
+    return near.item() * 0.95, far.item() * 1.05
 
 
 def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:
