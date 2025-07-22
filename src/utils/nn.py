@@ -217,7 +217,7 @@ class SphericalHarmonicsBasisEncoding(nn.Module):
 class InstantNGP(nn.Module):
     def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
                  min_res: int = 16, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128,
-                 f_sigma_init: float = 0.04, f_sigma_threshold: float = 0.01,
+                 f_sigma_init: float = 5.0, f_sigma_threshold: float = 2.956033378,
                  f_update_decay: float = 0.95, f_update_selection_rate: float = 0.5):
         """Init
 
