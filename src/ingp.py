@@ -31,11 +31,9 @@ class LInstantNGP(LU.LVolume):
             max_res_dense: Resolution to swap to sparse encoding for MLHHE
             f_res: Occupancy Grid Filter resolution
             f_sigma_init: OGF density init
-            f_sigma_threshold: OGF density threshold, defaults to 0.01 * 1024 (2 * sqrt(3))
+            f_sigma_threshold: OGF density threshold, defaults to 0.01 * 1024 / (2 * sqrt(3))
             f_update_decay: OGF update decay
             f_update_selection_rate: Rate of OGF update selection
-            coarse_samples: Initial samples to take per ray
-            fine_samples: Hierarchical resampling sample count
         """
         super().__init__()
         self.save_hyperparameters()
