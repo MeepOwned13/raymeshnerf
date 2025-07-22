@@ -114,13 +114,8 @@ class NeRFData(L.LightningDataModule):
 
 
 class LVolume(L.LightningModule):
-    def __init__(self, coarse_samples: int = 64, fine_samples: int = 128, **kwargs):
-        """Init
-
-        Args:
-            coarse_samples: Initial samples to take per ray
-            fine_samples: Hierarchical resampling sample count
-        """
+    def __init__(self, **kwargs):
+        """Init"""
         super().__init__()
         self.save_hyperparameters()
         self.nerf: torch.nn.Module = None
@@ -133,67 +128,36 @@ class LVolume(L.LightningModule):
         if stage == "fit":
             self.lossf = MSELoss(reduction='none')
         return super().setup(stage)
-
-    def compute_along_rays(self, origins: Tensor, directions: Tensor, near: float | None = None,
-                           far: float | None = None, coarse_samples: int | None = None, fine_samples: int | None = None,
-                           deterministic: bool = True, **kwargs) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Uniformally and Hierarchically sample rays and calculate RGBS using NeRF
+    
+    def render_rays(self, origins: Tensor, directions: Tensor, near: float | None = None, far: float | None = None):
+        """Render rays ready for display (e.g. don't return separate coarse, fine colors)
 
         Args:
             origins (shape[N, 3]): Ray origins in World coordinates
             directions (shape[N, 3]): Cartesian ray directions in World
-            near: Near plane, the first sample points' depth, if None uses hparams
-            far: Far plane, the last sample points' depth, if None uses hparams
-            coarse_samples: Uniform sample count along rays, if None uses hparams
-            fine_samples: Hierarchical sample count along rays, if None uses hparams
-            deterministic: Should hierarchical sampling be deterministic?
+            near: Near plane, the first sample points' depth
+            far: Far plane, the last sample points' depth
 
         Returns:
-            tuple: tuple containing (coarse_rgbs, coarse_depths, fine_rgbs, fine_depths)
-            - **coarse_rgbs**: *shape[N, coarse_samples, 4]*: RGBS predicted by NeRF for uniform samples
-            - **coarse_depths**: *shape[N, coarse_samples]*: Depths sampled uniformally, sorted and aligned to coarse_rgbs
-            - **fine_rgbs**: *shape[N, fine_samples, 4]*: RGBS predicted by NeRF for hierarchical samples
-            - **fine_depths**: *shape[N, fine_samples]*: Depths sampled hierarchically, sorted and aligned to fine_rgbs
+            tuple: a tuple containing (rgb, depth, acc) where
+            - **rgb**: *shape[N, 3]*: RGB value calculated for ray,
+            - **depth**: *shape[N]*: Approximated depth of ray termination,
+            - **acc**: *shape[N, 1]*: Sum of weights for pixel (alpha)
         """
-        near = self.hparams.get("near", near) or self.trainer.datamodule.hparams.near
-        far = self.hparams.get("far", far) or self.trainer.datamodule.hparams.far
-        coarse_samples = coarse_samples or self.hparams.coarse_samples
-        fine_samples = fine_samples or self.hparams.fine_samples
+        raise NotImplementedError(f"{self.__class__} hasn't implemented render_rays yet")
+    
+    def calculate_loss(self, origins, directions, colors):
+        """Calculate loss for rays
 
-        # This function deviates from the original NeRF paper as coarse and fine samples are processed by the same model
-        points, expanded_directions, coarse_depths = rays.sample_ray_uniformally(
-            origins=origins,
-            directions=directions,
-            near=near,
-            far=far,
-            num_samples=coarse_samples,
-        )
-        coarse_rgbs = self.nerf(points, expanded_directions)
+        Args:
+            origins (shape[N, 3]): Ray origins in World coordinates
+            directions (shape[N, 3]): Cartesian ray directions in World
+            colors (shape[N, 3]): Target pixel colors
 
-        # Bin bounds are halfway between sampled coordinates + near + far plane
-        bins = torch.cat([
-            torch.tensor(near, dtype=torch.float32, device=self.device).expand(origins.shape[0], 1),
-            (coarse_depths[..., 1:] + coarse_depths[..., :-1]) / 2,
-            torch.tensor(far, dtype=torch.float32, device=self.device).expand(origins.shape[0], 1),
-        ], -1)
-
-        points, expanded_directions, fine_depths = rays.sample_ray_hierarchically(
-            origins=origins,
-            directions=directions,
-            num_samples=fine_samples,
-            bins=bins,
-            weights=coarse_rgbs[..., -1],
-            deterministic=deterministic,
-        )
-        fine_rgbs = self.nerf(points, expanded_directions)
-
-        # deterministic ensures depth sorted output, if non-deterministic,
-        # sort manually as sortedness is required for volume rendering
-        if not deterministic:
-            fine_depths, idxs = torch.sort(fine_depths, dim=-1)
-            fine_rgbs = fine_rgbs[torch.arange(idxs.shape[0]).unsqueeze(1), idxs]
-
-        return coarse_rgbs, coarse_depths, fine_rgbs, fine_depths
+        Return:
+            loss (shape[N]): Per pixel loss
+        """
+        raise NotImplementedError(f"{self.__class__} hasn't implemented render_rays yet")
 
     @torch.no_grad()
     def render_image(self, height: int, width: int, c2w: Tensor, focal: Tensor, near: float | None = None,
@@ -230,8 +194,12 @@ class LVolume(L.LightningModule):
 
         image = []
         for o, d in data:
-            _, _, rgbs, depths = self.compute_along_rays(o, d, near, far)
-            rgb, _, alpha, _, _ = rays.render_rays(rgbs=rgbs, depths=depths, far=far)
+            rgb, _, alpha = self.render_rays(
+                origins=o,
+                directions=d,
+                near=near,
+                far=far,
+            )
             image.append(torch.cat((rgb, alpha), dim=-1))
 
         return torch.cat(image, 0).reshape(height, width, -1).clamp(0.0, 1.0)
@@ -347,32 +315,8 @@ class LVolume(L.LightningModule):
         return normals
 
     def training_step(self, batch, batch_idx):
-        far = self.hparams.get("far", None) or self.trainer.datamodule.hparams.far
-
         pointers, origins, directions, colors = batch
-        coarse_rgbs, coarse_depths, fine_rgbs, fine_depths = self.compute_along_rays(origins, directions)
-
-        coarse_colors, _, coarse_alphas, _, _ = rays.render_rays(
-            rgbs=coarse_rgbs, depths=coarse_depths, far=far
-        )
-        fine_colors, _, fine_alphas, _, _ = rays.render_rays(
-            rgbs=fine_rgbs, depths=fine_depths, far=far
-        )
-
-        if colors.shape[-1] == 4:  # RGBA, apply background noise to skew towards low density background
-            colors, alphas = colors[..., :3], colors[..., 3:4]
-            noise = torch.empty_like(colors).uniform_(self.background_noise_range[0], self.background_noise_range[1])
-
-            mixed_colors = colors * alphas + noise * (1 - alphas)
-            mixed_coarse_colors = coarse_colors * coarse_alphas + noise * (1 - coarse_alphas)
-            mixed_fine_colors = fine_colors * fine_alphas + noise * (1 - fine_alphas)
-
-            loss = (
-                self.lossf(mixed_coarse_colors, mixed_colors) + self.lossf(mixed_fine_colors, mixed_colors)
-            ).mean(-1)
-        else:  # RGB
-            loss = (self.lossf(coarse_colors, colors) + self.lossf(fine_colors, colors)).mean(-1)
-
+        loss = self.calculate_loss(origins, directions, colors)
         self.trainer.datamodule.train_rays.update_weights(pointers, loss)
         loss = loss.mean()
 
@@ -413,35 +357,34 @@ class LVolume(L.LightningModule):
 
 
 class OGFilterCallback(Callback):
-    def __init__(self, num_backprops: int = 8):
-        self.num_backprops = num_backprops
-        self._current = 0
-
-    def on_after_backward(self, _, module):
-        self._current += 1
-        if self._current >= self.num_backprops:
-            module.nerf.update_filter()
-            self._current = 0
+    def __init__(self, per_backwards: int = 8, full_update_n_backwards: int = 8):
+        self.per_backwards = per_backwards
+        self.full_update_n_backwards = full_update_n_backwards
+    
+    def on_before_zero_grad(self, trainer, pl_module, optimizer):
+        if self.per_backwards and trainer.global_step > 0 and (trainer.global_step % self.per_backwards == 0):
+            pl_module.nerf.update_filter(full_selection=trainer.global_step <= self.full_update_n_backwards)
+        return super().on_before_zero_grad(trainer, pl_module, optimizer)
 
 
 class PixelSamplerUpdateCallback(Callback):
-    def __init__(self, per_steps: int | None = None):
+    def __init__(self, per_backwards: int | None = None):
         """Updates pixel sampler on_validation_epoch_end and logs 8 pixel weight images to Tensorboard
         
         Args:
-            per_steps: If specified, update happens after the specified steps (without logging)
+            per_backwards: If specified, update happens after the specified steps (without logging)
         """
         super().__init__()
-        self.per_steps = per_steps
+        self.per_backwards = per_backwards
 
     def update_image_weights(self, trainer):
         if trainer and not trainer.sanity_checking:  # Disable update on sanity check
             trainer.datamodule.train_rays.update_image_weights()
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if self.per_steps and (trainer.global_step % self.per_steps) == 0:
+    def on_before_zero_grad(self, trainer, pl_module, optimizer):
+        if self.per_backwards and trainer.global_step > 0 and (trainer.global_step % self.per_backwards == 0):
             self.update_image_weights(trainer)
-        return super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
+        return super().on_before_zero_grad(trainer, pl_module, optimizer)
 
     def on_validation_epoch_end(self, trainer, pl_module):
         self.update_image_weights(trainer)

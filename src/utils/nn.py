@@ -216,10 +216,9 @@ class SphericalHarmonicsBasisEncoding(nn.Module):
 
 class InstantNGP(nn.Module):
     def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
-                 min_res: int = 32, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128,
-                 f_sigma_init: float = 0.04, f_sigma_threshold: float = 0.01, f_stochastic_test: bool = True,
-                 f_update_decay: float = 0.7, f_update_noise_scale: float = None,
-                 f_update_selection_rate: float = 0.25):
+                 min_res: int = 16, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128,
+                 f_sigma_init: float = 0.04, f_sigma_threshold: float = 0.01,
+                 f_update_decay: float = 0.95, f_update_selection_rate: float = 0.5):
         """Init
 
         Args:
@@ -233,9 +232,7 @@ class InstantNGP(nn.Module):
             f_res: Occupancy Grid Filter resolution
             f_sigma_init: OGF density init
             f_sigma_threshold: OGF density threshold
-            f_stochastic_test: Toggles OGF stochastic test
             f_update_decay: OGF update decay
-            f_update_noise_scale: OGF update noise scale
             f_update_selection_rate: Rate of OGF update selection
         """
         super(InstantNGP, self).__init__()
@@ -243,9 +240,7 @@ class InstantNGP(nn.Module):
             res=f_res,
             density_initial=f_sigma_init,
             density_threshold=f_sigma_threshold,
-            stochastic_test=f_stochastic_test,
             update_decay=f_update_decay,
-            update_noise_scale=f_update_noise_scale,
             update_selection_rate=f_update_selection_rate,
         )
         """Occupancy Grid Filtering for coordinates"""
@@ -332,5 +327,5 @@ class InstantNGP(nn.Module):
         rgbs = torch.cat([rgb, sigma], dim=-1).reshape(out_shape + [-1])
         return rgbs
 
-    def update_filter(self):
-        self.filter.update(self)
+    def update_filter(self, full_selection: bool = False):
+        self.filter.update(self, full_selection=full_selection)

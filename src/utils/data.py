@@ -176,8 +176,7 @@ def compute_near_far_planes(c2ws: Tensor) -> tuple[float, float]:
     near = min_dfc - torch.sqrt(torch.tensor(3))
     far = max_dfc + torch.sqrt(torch.tensor(3))
 
-    # Multiply a little bit extra to make sure ray can hit everything needed in box
-    return near.item() * 0.95, far.item() * 1.05
+    return near.item(), far.item()
 
 
 def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:
