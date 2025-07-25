@@ -129,9 +129,9 @@ class LNeRF(LU.LVolume):
 
             loss = (
                 self.lossf(mixed_coarse_colors, mixed_colors) + self.lossf(mixed_fine_colors, mixed_colors)
-            ).mean(-1)
+            )
         else:  # RGB
-            loss = (self.lossf(coarse_colors, colors) + self.lossf(fine_colors, colors)).mean(-1)
+            loss = (self.lossf(coarse_colors, colors) + self.lossf(fine_colors, colors))
         return loss
 
     def configure_optimizers(self):
@@ -157,9 +157,7 @@ if __name__ == '__main__':
     L.seed_everything(42)
     decay = 5e-7
 
-    data = LU.NeRFData(
-        "Shurtape_Tape_Purple_CP28", batch_size=2**9, epoch_size=2**20, rays_per_image=2**8
-    )
+    data = LU.NeRFData("Shurtape_Tape_Purple_CP28", batch_size=2**9)
     module = LNeRF(weight_decay=decay, coarse_samples=128)
     logger = TensorBoardLogger(".", default_hp_metric=False, version=f"shurtape200x200_decay={decay:.0e}")
 
@@ -167,14 +165,10 @@ if __name__ == '__main__':
     trainer = L.Trainer(
         max_epochs=15, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
         callbacks=[
-            LU.PixelSamplerUpdateCallback(2**10),
             LearningRateMonitor(logging_interval="epoch"),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1,
                             save_weights_only=True),
             ModelCheckpoint(filename="end_{epoch}", save_on_train_epoch_end=True, every_n_epochs=1),
-        ],
-        plugins=[
-            LU.RemoveCheckpointKeyBasedOnPathCheckpointPlugin("val_psnr", "NeRFData")
         ]
     )
 

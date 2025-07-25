@@ -66,13 +66,14 @@ class LInstantNGP(LU.LVolume):
             near=near,
             far=far,
             num_samples=2**10,
+            perturb=not deterministic,
         )
         rgbs = self.nerf(points, expanded_directions)
         rgb, depth, acc, _, _ = U.rays.render_rays(rgbs=rgbs, depths=depths, far=far)
         return rgb, depth, acc
     
     def calculate_loss(self, origins, directions, colors):
-        p_rgb, _, p_alpha = self.render_rays(origins, directions)
+        p_rgb, _, p_alpha = self.render_rays(origins, directions, deterministic=False)
 
         if colors.shape[-1] == 4:  # RGBA, apply background noise to skew towards low density background
             colors, alphas = colors[..., :3], colors[..., 3:4]
@@ -81,9 +82,9 @@ class LInstantNGP(LU.LVolume):
             mixed_colors = colors * alphas + noise * (1 - alphas)
             mixed_pred_colors = p_rgb * p_alpha + noise * (1 - p_alpha)
 
-            loss = self.lossf(mixed_pred_colors, mixed_colors).mean(-1)
+            loss = self.lossf(mixed_pred_colors, mixed_colors)
         else:  # RGB
-            loss = self.lossf(p_rgb, colors).mean(-1)
+            loss = self.lossf(p_rgb, colors)
         return loss
     
     def configure_optimizers(self):
@@ -97,7 +98,7 @@ class LInstantNGP(LU.LVolume):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": torch.optim.lr_scheduler.ExponentialLR(
-                    optimizer, gamma=0.6
+                    optimizer, gamma=0.7
                 ),
             }
         }
@@ -109,27 +110,20 @@ if __name__ == '__main__':
 
     L.seed_everything(42)
 
-    data = LU.NeRFData(
-        "Weisshai_Great_White_Shark", batch_size=2**9, epoch_size=2**20, rays_per_image=2**8,
-    )
+    data = LU.NeRFData("Weisshai_Great_White_Shark", batch_size=2**9)
     module = LInstantNGP()
     logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_weisshai_shark400x400")
 
-    batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(
         max_epochs=20, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
-        accumulate_grad_batches=2**4,
+        accumulate_grad_batches=2**4, limit_train_batches=2**11,
         callbacks=[
             LU.OGFilterCallback(16, 8),
-            LU.PixelSamplerUpdateCallback(32),
             LearningRateMonitor(logging_interval="epoch"),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1,
                             save_weights_only=True),
             ModelCheckpoint(filename="end_{epoch}", save_on_train_epoch_end=True, every_n_epochs=1),
-            EarlyStopping(monitor="val_psnr", mode="max", patience=1, min_delta=0.1)
-        ],
-        plugins=[
-            LU.RemoveCheckpointKeyBasedOnPathCheckpointPlugin("val_psnr", "NeRFData")
+            EarlyStopping(monitor="val_psnr", mode="max", patience=1, min_delta=0.05)
         ]
     )
 

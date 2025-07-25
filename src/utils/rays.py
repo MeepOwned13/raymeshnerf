@@ -112,37 +112,6 @@ def create_rays(height: int, width: int, intrinsic: Tensor, c2w: Tensor) -> tupl
     return ray_origins, ray_directions
 
 
-@torch.no_grad()
-def sobel_filter(images: Tensor) -> Tensor:
-    """Applies the Sobel-Feldman operator to a batch of images
-
-    Args:
-        images (shape[K, W, H, 3-4]): Batch of rgb(a) images
-
-    Return:
-        edges (shape[K, W, H]): Edge intensities
-    """
-    # Sobel-Feldman operator
-    filter = nn.Conv2d(in_channels=1, out_channels=2, kernel_size=3, stride=1,
-                       padding=1, padding_mode='replicate', bias=False, dtype=torch.float32)
-    gx = torch.tensor([
-        [3.0, 0.0, -3.0],
-        [10.0, 0.0, -10.0],
-        [3.0, 0.0, -3.0],
-    ], dtype=torch.float32)
-    gy = torch.tensor([
-        [3.0, 10.0, 3.0],
-        [0.0, 0.0, 0.0],
-        [-3.0, -10.0, -3.0],
-    ], dtype=torch.float32)
-    weights = torch.stack([gx, gy], 0).unsqueeze(1)
-    filter.weight = nn.Parameter(weights, requires_grad=False)
-
-    edges = filter(images[..., :3].mean(dim=-1).unsqueeze(1))
-    edges = torch.sqrt(torch.sum(edges ** 2, dim=1))
-    return edges
-
-
 def sample_ray_uniformally(origins: Tensor, directions: Tensor, near: float, far: float,
                            num_samples: int, perturb=True) -> tuple[Tensor, Tensor, Tensor]:
     """Uniformally sample rays and return them in the World coordinate system
@@ -318,4 +287,3 @@ def render_rays(rgbs: Tensor, depths: Tensor, far: float) -> tuple[Tensor, Tenso
     acc = torch.sum(weights, dim=-1).unsqueeze(-1)
 
     return rgb, depth, acc, alpha, weights
-

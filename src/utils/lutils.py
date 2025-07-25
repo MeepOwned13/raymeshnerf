@@ -7,31 +7,14 @@ from torchmetrics.functional.image import peak_signal_noise_ratio, structural_si
     learned_perceptual_image_patch_similarity
 import lightning as L
 from lightning.pytorch.callbacks import Callback
-from lightning.pytorch.plugins import TorchCheckpointIO
-import re
-import random
-import numpy as np
 import warnings
 
 from . import data, rays
 
 
-def w_init_fn(worker_id):
-    # Get current random seed
-    worker_seed = torch.initial_seed() % 2**32
-    # Set seeds for all relevant libraries
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-    torch.manual_seed(worker_seed)
-    # For CUDA:
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(worker_seed)
-        torch.cuda.manual_seed_all(worker_seed)
-
-
 class NeRFData(L.LightningDataModule):
     def __init__(self, object_name: str, batch_size: int = 1024, horizontal_val_angles: int = 4,
-                 vertical_val_angles: int = 3, epoch_size: int = 2**20, rays_per_image: int = 2**12):
+                 vertical_val_angles: int = 3):
         """Init
 
         Args:
@@ -39,12 +22,9 @@ class NeRFData(L.LightningDataModule):
             batch_size: #Rays in a batch
             horizontal_val_angles: #angles to take for validation horizontally
             vertical_val_angles: #angles to take for validation vertically
-            epoch_size: #Rays in a single epoch
-            rays_per_image: Consecutive #Rays to sample from an image
         """
         super().__init__()
         self.save_hyperparameters()
-        data.RayDataset.disable_multiprocessing_length_warning()
 
     def load_from_file(self):
         return data.load_obj_data(self.hparams.object_name)
@@ -66,14 +46,8 @@ class NeRFData(L.LightningDataModule):
         train_imgs, train_c2ws = images[train_idxs], c2ws[train_idxs]
 
         if stage == "fit":
-            self.train_rays: data.RayDataset = data.RayDataset(
-                images=train_imgs,
-                c2ws=train_c2ws,
-                focal=torch.tensor(self.hparams.focal, dtype=torch.float32),
-                rays_per_image=self.hparams.rays_per_image,
-                length=self.hparams.epoch_size,
-            )
-            """Dataset: (pointers, origins, directions, colors)"""
+            self.train_rays: TensorDataset = TensorDataset(*data.create_nerf_data(train_imgs, train_c2ws, focal=focal))
+            """Dataset: (origins, directions, colors)"""
 
             self.val_angles: TensorDataset = TensorDataset(
                 val_c2ws,
@@ -86,11 +60,10 @@ class NeRFData(L.LightningDataModule):
         return DataLoader(
             dataset=self.train_rays,
             batch_size=self.hparams.batch_size,
-            shuffle=False,
+            shuffle=True,
             num_workers=6,
-            prefetch_factor=6,
+            prefetch_factor=4,
             persistent_workers=True,
-            worker_init_fn=w_init_fn,
         )
 
     def val_dataloader(self):
@@ -101,16 +74,7 @@ class NeRFData(L.LightningDataModule):
             num_workers=2,
             prefetch_factor=2,
             persistent_workers=True,
-            worker_init_fn=w_init_fn
         )
-    
-    def state_dict(self):
-        return {
-            "pixel_weights": self.train_rays.dump_weights()
-        }
-    
-    def load_state_dict(self, state_dict):
-        self.train_rays.load_weights(state_dict["pixel_weights"].cpu())
 
 
 class LVolume(L.LightningModule):
@@ -126,7 +90,7 @@ class LVolume(L.LightningModule):
         if self.nerf is None:
             raise NotImplementedError(f"{self.__class__} must have .nerf attribute defined")
         if stage == "fit":
-            self.lossf = MSELoss(reduction='none')
+            self.lossf = MSELoss()
         return super().setup(stage)
     
     def render_rays(self, origins: Tensor, directions: Tensor, near: float | None = None, far: float | None = None):
@@ -155,7 +119,7 @@ class LVolume(L.LightningModule):
             colors (shape[N, 3]): Target pixel colors
 
         Return:
-            loss (shape[N]): Per pixel loss
+            loss (shape[]): Loss
         """
         raise NotImplementedError(f"{self.__class__} hasn't implemented render_rays yet")
 
@@ -206,7 +170,7 @@ class LVolume(L.LightningModule):
     
     def locate_density_gradient_based_surface_depth(
         self, origins: Tensor, directions: Tensor, sigma_limit: float = 5.0, gamma: float = 5e-6,
-        non_grad_step_size: float = 3e-2, grad_epsilon: float = 5e-2, max_iters: int = 300,
+        non_grad_step_size: float = 3e-2, min_step_size: float = 1e-5, max_iters: int = 300,
         silence_input_size_warning: bool = False
     ) -> tuple[Tensor, Tensor]:
         """Main algorithm of RayMeshNerf, finds surface point depth using gradient ascent
@@ -217,7 +181,7 @@ class LVolume(L.LightningModule):
             sigma_limit: When sigma is larger than this, we use gradient ascent
             gamma: Step size multiplier (analogous to learning rate for gradient descent)
             non_grad_step_size: Step size when sigma is below limit
-            grad_epsilon: If the magnitude of the gradient falls below this, we found depth for the surface point
+            min_step_size: If step size falls below this, point is considered a surface point
             max_iters: Limit for iteration count
             silence_input_size_warning: Silence the warning associated with input count being over 2^19 for GPU
 
@@ -269,7 +233,7 @@ class LVolume(L.LightningModule):
             # Stepping stops if:
             # - gradient falls below limit (and this step used the gradient!), surface point depth estimate is found
             # - depth goes beyond the far plane
-            mask_update = ((grad.abs() >= grad_epsilon) | ~grad_step).squeeze(-1) &\
+            mask_update = ((step_size.abs() >= min_step_size) | ~grad_step).squeeze(-1) &\
                         (masked_depth < self.hparams.far).squeeze(-1)
             # - already stopped at a previous step (ensured by re-indexing mask)
             in_progress_mask[in_progress_mask.clone()] = mask_update
@@ -315,11 +279,8 @@ class LVolume(L.LightningModule):
         return normals
 
     def training_step(self, batch, batch_idx):
-        pointers, origins, directions, colors = batch
+        origins, directions, colors = batch
         loss = self.calculate_loss(origins, directions, colors)
-        self.trainer.datamodule.train_rays.update_weights(pointers, loss)
-        loss = loss.mean()
-
         self.log("train_loss", loss, prog_bar=True, on_step=True)
         return loss
 
@@ -354,70 +315,22 @@ class LVolume(L.LightningModule):
 
     def configure_optimizers(self):
         raise NotImplementedError("configure_optimizers must be overwritten in subclass")
-
+    
 
 class OGFilterCallback(Callback):
     def __init__(self, per_backwards: int = 8, full_update_n_backwards: int = 8):
+        """Callback to update Occupancy Grid filter of trainer.nerf
+        
+        Args:
+            per_backwards: Update filter after n backward operations
+            full_update_n_backwards: First n backwards to use full update for, selection of grid nodes is stochastic
+                afterwards
+        """
         self.per_backwards = per_backwards
         self.full_update_n_backwards = full_update_n_backwards
     
     def on_before_zero_grad(self, trainer, pl_module, optimizer):
-        if self.per_backwards and trainer.global_step > 0 and (trainer.global_step % self.per_backwards == 0):
-            pl_module.nerf.update_filter(full_selection=trainer.global_step <= self.full_update_n_backwards)
+        gstep = trainer.global_step
+        if self.per_backwards and gstep > 0 and (gstep % self.per_backwards == 0):
+            pl_module.nerf.update_filter(full_selection=gstep <= (self.full_update_n_backwards * self.per_backwards))
         return super().on_before_zero_grad(trainer, pl_module, optimizer)
-
-
-class PixelSamplerUpdateCallback(Callback):
-    def __init__(self, per_backwards: int | None = None):
-        """Updates pixel sampler on_validation_epoch_end and logs 8 pixel weight images to Tensorboard
-        
-        Args:
-            per_backwards: If specified, update happens after the specified steps (without logging)
-        """
-        super().__init__()
-        self.per_backwards = per_backwards
-
-    def update_image_weights(self, trainer):
-        if trainer and not trainer.sanity_checking:  # Disable update on sanity check
-            trainer.datamodule.train_rays.update_image_weights()
-
-    def on_before_zero_grad(self, trainer, pl_module, optimizer):
-        if self.per_backwards and trainer.global_step > 0 and (trainer.global_step % self.per_backwards == 0):
-            self.update_image_weights(trainer)
-        return super().on_before_zero_grad(trainer, pl_module, optimizer)
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        self.update_image_weights(trainer)
-
-        if trainer and not trainer.sanity_checking:  # Disable image logging on sanity check
-            idxs = [torch.round(i).to(int).item() for i in torch.linspace(
-                torch.tensor(0),
-                torch.tensor(len(trainer.datamodule.train_rays.data) - 1),
-                steps=8, dtype=torch.float32)
-            ]
-            weights = [trainer.datamodule.train_rays.data[i][3].weights for i in idxs]
-            weights = [w / w.max() for w in weights]
-            weights = torch.stack(weights, dim=0).unsqueeze(1).expand(-1, 3, -1, -1)
-            trainer.logger.experiment.add_image(
-                "Sample weights", make_grid(weights, nrow=4, padding=5), trainer.global_step
-            )
-        return super().on_validation_epoch_end(trainer, pl_module)
-    
-
-class RemoveCheckpointKeyBasedOnPathCheckpointPlugin(TorchCheckpointIO):
-    def __init__(self, trim_file_contains: str, delkey: str):
-        """Deletes the key specified by 'delkey' on checkpoint files which contain 'trim_file_contains'
-        
-        Args:
-            trim_file_contains: String that files which need trimming contain
-            delkey: Which key to delete from checkpoint, e.g. 'NeRFData' results in pixel weights being trimmed
-        """
-        super().__init__()
-        self.trim_file_contains = trim_file_contains
-        self.delkey = delkey
-
-    def save_checkpoint(self, checkpoint, path, storage_options = None):
-        if re.match(fr".*/[^/]*{self.trim_file_contains}[^/]*", path):
-            del checkpoint[self.delkey]
-
-        return super().save_checkpoint(checkpoint, path, storage_options)
