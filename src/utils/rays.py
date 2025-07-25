@@ -87,6 +87,8 @@ def create_rays(height: int, width: int, intrinsic: Tensor, c2w: Tensor) -> tupl
     """
     device = c2w.device
 
+    # Doing everything on cpu so later ops don't run out of 2^19 kernel
+    c2w, intrinsic = c2w.cpu(), intrinsic.cpu()
     focal_x = intrinsic[0, 0]
     focal_y = intrinsic[1, 1]
     # cx and cy handle the misalignement of the principal point with the center of the image
@@ -95,21 +97,21 @@ def create_rays(height: int, width: int, intrinsic: Tensor, c2w: Tensor) -> tupl
 
     # Index each point on the image, determine ray directions to them
     i, j = torch.meshgrid(
-        torch.arange(width, dtype=torch.float32, device=device),
-        torch.arange(height, dtype=torch.float32, device=device),
+        torch.arange(width, dtype=torch.float32),
+        torch.arange(height, dtype=torch.float32),
         indexing='xy'
     )
     directions = torch.stack((
         (i - cx) / focal_x,
         -(j - cy) / focal_y,
-        -torch.ones(i.shape, dtype=torch.float32, device=device)  # -1 since ray is cast away from camera
+        -torch.ones(i.shape, dtype=torch.float32)  # -1 since ray is cast away from camera
     ), -1)
 
     # Transform ray directions to World, origins just need to be broadcasted accordingly
     ray_directions = F.normalize(directions @ c2w[:3, :3].T, "fro", -1)
     ray_origins = torch.broadcast_to(c2w[:3, -1], ray_directions.shape)  # c2w last column determines position
 
-    return ray_origins, ray_directions
+    return ray_origins.to(device), ray_directions.to(device)
 
 
 def sample_ray_uniformally(origins: Tensor, directions: Tensor, near: float, far: float,

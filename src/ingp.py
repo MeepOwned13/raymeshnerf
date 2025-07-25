@@ -112,11 +112,11 @@ if __name__ == '__main__':
 
     data = LU.NeRFData("Weisshai_Great_White_Shark", batch_size=2**9)
     module = LInstantNGP()
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_weisshai_shark400x400")
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_weisshai_shark800x800")
 
     trainer = L.Trainer(
         max_epochs=20, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
-        accumulate_grad_batches=2**4, limit_train_batches=2**11,
+        accumulate_grad_batches=2**4, limit_train_batches=2**12,
         callbacks=[
             LU.OGFilterCallback(16, 8),
             LearningRateMonitor(logging_interval="epoch"),
