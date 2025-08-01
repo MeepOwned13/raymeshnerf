@@ -258,12 +258,12 @@ class LVolume(L.LightningModule):
             normals (shape[N, 3]): Estimated normal vectors
         """
 
-        total_count = torch.prod(torch.tensor(points.shape)).item()
+        total_count = torch.prod(torch.tensor(points.shape[:-1])).item()
         if total_count > 2**19 and self.device != torch.device('cpu') and not silence_input_size_warning:
             warnings.warn(
                 f"Total input count over {2**19} ({total_count}). This may cause inconsistencies with CUDA and ROCM "
                 "implementations, resulting in the model returning the same numbers for points beyond the limit "
-                "and thus calculating incorrect depths. Make sure to batch input to at most 2^19 chunks",
+                "and thus calculating incorrect normals. Make sure to batch input to at most 2^19 chunks",
                 category=UserWarning,
                 stacklevel=2  # Shows the caller's line in the warning
             )
