@@ -102,10 +102,11 @@ def compute_near_far_planes(c2ws: Tensor) -> tuple[float, float]:
     min_dfc = distance_from_center.min()
 
     # Distance to box corner is maximal at sqrt(3) for [-1, 1] bbox
-    near = min_dfc - torch.sqrt(torch.tensor(3))
-    far = max_dfc + torch.sqrt(torch.tensor(3))
+    near = max(0, (min_dfc - torch.sqrt(torch.tensor(3))).item())
+    far = (max_dfc + torch.sqrt(torch.tensor(3))).item()
+    print(near, far)
 
-    return near.item(), far.item()
+    return near, far
 
 
 def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:
