@@ -127,7 +127,7 @@ def create_batch_sensor(n: int, radius: float, size: int = 200, fov_x: float = 4
     return mi.load_dict(batch_sensor), extrinsics, focal.astype(np.float32)
 
 
-def render_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: int = 800, fov_x: float = 40,
+def render_gso_mesh(obj_path: Path, sensor_count: int, radius: float = 4.0, size: int = 800, fov_x: float = 40,
                 deterministic=False) -> tuple[np.ndarray, np.ndarray, float]:
     """Renders mesh specified by path from multiple angles
 
@@ -194,7 +194,7 @@ if __name__ == '__main__':
     save_path = (Path(__file__) / "../../../data" / args.object_name).resolve().absolute()
 
     print(f"Rendering '{args.object_name}' from {args.sensor_count} angles at {args.size}x{args.size}")
-    images, c2ws, focal = render_mesh(obj_path, args.sensor_count, size=args.size, deterministic=args.deterministic)
+    images, c2ws, focal = render_gso_mesh(obj_path, args.sensor_count, size=args.size, deterministic=args.deterministic)
     np.savez_compressed(save_path, images=images, c2ws=c2ws, focal=focal)
     print(f"Render saved to '{save_path}'")
 

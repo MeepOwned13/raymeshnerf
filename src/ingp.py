@@ -98,7 +98,7 @@ class LInstantNGP(LU.LVolume):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": torch.optim.lr_scheduler.ExponentialLR(
-                    optimizer, gamma=0.7
+                    optimizer, gamma=0.85
                 ),
             }
         }
@@ -110,20 +110,20 @@ if __name__ == '__main__':
 
     L.seed_everything(42)
 
-    data = LU.NeRFData("Weisshai_Great_White_Shark", batch_size=2**9)
+    data = LU.NeRFData("scan24", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_indices=[-16])
     module = LInstantNGP()
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_weisshai_shark800x800")
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}")
 
     trainer = L.Trainer(
-        max_epochs=20, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
+        max_epochs=50, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
         accumulate_grad_batches=2**4, limit_train_batches=2**12,
         callbacks=[
-            LU.OGFilterCallback(16, 8),
+            LU.OGFilterCallback(16, 32),
             LearningRateMonitor(logging_interval="epoch"),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1,
                             save_weights_only=True),
             ModelCheckpoint(filename="end_{epoch}", save_on_train_epoch_end=True, every_n_epochs=1),
-            EarlyStopping(monitor="val_psnr", mode="max", patience=1, min_delta=0.05)
+            EarlyStopping(monitor="val_psnr", mode="max", patience=2, min_delta=0.05)
         ]
     )
 

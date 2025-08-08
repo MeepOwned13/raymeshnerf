@@ -48,13 +48,13 @@ def equidistance_rotations(n: int) -> tuple[Tensor, Tensor]:
             - **thetas**: *shape[n]*: Thetas - vertical rotations - in radians
     """
     i = torch.arange(0, n, dtype=torch.float32) + 0.5
-    phis = torch.pi * i * (1 + torch.sqrt(torch.tensor(5)))
+    phis = torch.pi * i * (1 + torch.sqrt(torch.tensor(5))) % (2 * torch.pi)
     thetas = torch.arccos(1 - 2 * i / n)
 
     return phis, thetas
 
 
-def intrinsic(focal: Tensor | tuple | list, size: Tensor | tuple | list):
+def create_intrinsic(focal: Tensor | tuple | list, size: Tensor | tuple | list):
     """Create intrinsic matrix from focal length and image size
 
     Args:

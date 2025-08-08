@@ -8,53 +8,68 @@ from torchmetrics.functional.image import peak_signal_noise_ratio, structural_si
 import lightning as L
 from lightning.pytorch.callbacks import Callback
 import warnings
+import re
 
 from . import data, rays
 
 
 class NeRFData(L.LightningDataModule):
-    def __init__(self, object_name: str, batch_size: int = 1024, horizontal_val_angles: int = 4,
-                 vertical_val_angles: int = 3):
+    def __init__(self, name: str, source: data.ObjectSource, batch_size: int = 1024, val_angle_count: int | None = None,
+                 val_angle_indices: list[int] | None = None):
         """Init
 
         Args:
-            object_name: Name of object in data directory
+            name: Name of object in data directory
             batch_size: #Rays in a batch
-            horizontal_val_angles: #angles to take for validation horizontally
-            vertical_val_angles: #angles to take for validation vertically
+            val_angle_count: How many equidistant validation angles to choose (closest to equidistant angles),
+                exclusive with `val_angle_indices`
+            val_angle_indices: Which indices to choose from the images for validation, exclusive with `val_angle_count`
         """
         super().__init__()
+
+        if val_angle_count is not None and val_angle_indices is not None:
+            raise ValueError("Only one of `val_angle_count` or `val_angle_indices` can be specified")
+        if val_angle_count is None and val_angle_indices is None:
+            raise ValueError("Either `val_angle_count` or `val_angle_indices` must be specified")
+
         self.save_hyperparameters()
+        # Making sure it is in the ObjectSource Enum for function calls
+        self.hparams.source = data.ObjectSource(self.hparams.source)
+
+    @property
+    def scene_name(self):
+        return f"{self.hparams.source.value}_{re.sub(r"\s+", r"_", self.hparams.name)}"
 
     def load_from_file(self):
-        return data.load_obj_data(self.hparams.object_name)
+        return data.load_data(self.hparams.name, self.hparams.source)
 
     def setup(self, stage: str):
-        images, c2ws, focal = self.load_from_file()
+        images, c2ws, intrinsics = self.load_from_file()
         self.hparams.near, self.hparams.far = data.compute_near_far_planes(c2ws=c2ws)
-        self.hparams.focal = focal.item()
         self.save_hyperparameters()
 
-        val_idxs = data.find_val_angles(
-            c2ws=c2ws,
-            horizontal_partitions=self.hparams.horizontal_val_angles,
-            vertical_partitions=self.hparams.vertical_val_angles,
-        )
-        val_imgs, val_c2ws = images[val_idxs], c2ws[val_idxs]
+        # Swapping between automatic choice of "equidistant angles" and pre-set indices
+        if self.hparams.val_angle_indices:
+            val_idxs = self.hparams.val_angle_indices
+        else:
+            val_idxs = data.find_val_angles(c2ws=c2ws, angle_count=self.hparams.val_angle_count)
+        val_imgs, val_c2ws, val_intrinsics = images[val_idxs], c2ws[val_idxs], intrinsics[val_idxs]
 
         train_idxs = [i for i in range(images.shape[0]) if i not in val_idxs]
-        train_imgs, train_c2ws = images[train_idxs], c2ws[train_idxs]
+        train_imgs, train_c2ws, train_intrinsics = images[train_idxs], c2ws[train_idxs], intrinsics[train_idxs]
 
         if stage == "fit":
-            self.train_rays: TensorDataset = TensorDataset(*data.create_nerf_data(train_imgs, train_c2ws, focal=focal))
+            self.train_rays: TensorDataset = TensorDataset(
+                *data.create_nerf_data(train_imgs, train_c2ws, train_intrinsics)
+            )
             """Dataset: (origins, directions, colors)"""
 
             self.val_angles: TensorDataset = TensorDataset(
                 val_c2ws,
-                torch.tensor([focal], dtype=torch.float32).expand(val_c2ws.shape[0]),
+                val_intrinsics,
                 val_imgs
             )
-            """Dataset: (c2w, focal, image)"""
+            """Dataset: (c2w, intrinsic, image)"""
 
     def train_dataloader(self):
         return DataLoader(
@@ -124,7 +139,7 @@ class LVolume(L.LightningModule):
         raise NotImplementedError(f"{self.__class__} hasn't implemented render_rays yet")
 
     @torch.no_grad()
-    def render_image(self, height: int, width: int, c2w: Tensor, focal: Tensor, near: float | None = None,
+    def render_image(self, height: int, width: int, c2w: Tensor, intrinsic: Tensor, near: float | None = None,
                      far: float | None = None, batch_size: int | None = None) -> Tensor:
         """Renders an image using NeRF and Volume Rendering
 
@@ -132,7 +147,7 @@ class LVolume(L.LightningModule):
             height: Image height
             width: Image width
             c2w (shape[4, 4]): Extrinsic camera matrix (Camera to World)
-            focal (shape[]): Focal length
+            intrinsic (shape[3, 3]): Intrinsic camera matrix
             near: Near plane, the first sample points' depth, if None uses hparams
             far: Far plane, the last sample points' depth, if None uses hparams
             batch_size: Batch size for rendering, if None uses hparams
@@ -144,9 +159,6 @@ class LVolume(L.LightningModule):
         far = self.hparams.get("far", far) or self.trainer.datamodule.hparams.far
         batch_size = self.hparams.get("batch_size", batch_size) or self.trainer.datamodule.hparams.batch_size
 
-        intrinsic = rays.intrinsic(
-            torch.tensor([focal.item(), focal.item()]), torch.tensor([width, height])
-        ).to(self.device)
         origins, directions = rays.create_rays(
             height=height,
             width=width,
@@ -288,15 +300,19 @@ class LVolume(L.LightningModule):
         self.val_imgs = []
 
     def validation_step(self, batch, batch_idx):
-        c2w, focal, image = batch
-        render = self.render_image(image.shape[1], image.shape[2], c2w[0], focal[0]).unsqueeze(0)
+        c2w, intrinsic, image = batch
+        render = self.render_image(image.shape[1], image.shape[2], c2w[0], intrinsic[0]).unsqueeze(0)
         
         cloned_render = render.clone()  # Used for display
         self.val_imgs.append(cloned_render.permute(0, 3, 1, 2))
 
-        if image.shape[-1] == 4:  # Transparency isn't handled well by PSNR, compositing with neutral gray background
-            background = torch.full_like(render[..., :3], 0.5)
+        # Transparency isn't handled well by PSNR, compositing with neutral gray background
+        if image.shape[-1] == 4:  # Image side
+            background = torch.full_like(image[..., :3], 0.5)
             image = (image[..., :3] * image[..., 3:4]) + (background * (1 - image[..., 3:4]))
+        
+        if render.shape[-1] == 4:  # Render side
+            background = torch.full_like(render[..., :3], 0.5)
             render = (render[..., :3] * render[..., 3:4]) + (background * (1 - render[..., 3:4]))
 
         render, image = render.permute(0, 3, 1, 2), image.permute(0, 3, 1, 2)

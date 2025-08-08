@@ -157,9 +157,9 @@ if __name__ == '__main__':
     L.seed_everything(42)
     decay = 5e-7
 
-    data = LU.NeRFData("Shurtape_Tape_Purple_CP28", batch_size=2**9)
+    data = LU.NeRFData("Shurtape_Tape_Purple_CP28", U.data.ObjectSource.GSO, batch_size=2**9, val_angle_count=12)
     module = LNeRF(weight_decay=decay, coarse_samples=128)
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"shurtape200x200_decay={decay:.0e}")
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"nerf_{data.scene_name}")
 
     batches_in_epoch = data.hparams.epoch_size // data.hparams.batch_size
     trainer = L.Trainer(

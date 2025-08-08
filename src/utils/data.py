@@ -3,19 +3,21 @@ from torch import Tensor
 import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
-import torch.multiprocessing as mp
+from enum import StrEnum
+from PIL import Image
+import cv2
 
-from .rays import create_rays
-from .mesh_render import render_mesh
+from .rays import create_rays, create_intrinsic, equidistance_rotations
+from .mesh_render import render_gso_mesh
 
 
-def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+def create_nerf_data(images: Tensor, c2ws: Tensor, intrinsics: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Creates rays for NeRF training
 
     Args:
         image (shape[N, H, W, 3-4]): Images to extract colors and sizes from
         c2w (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
-        focal (shape[]): Focal length
+        intrinsic (shape[N, 3, 3]): Intrinsic camera matrices
 
     Returns:
         tuple: tuple containing (origins, directions, colors, pixel_weights)
@@ -26,13 +28,7 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor) -> tuple[Tenso
     origins, directions, colors = [], [], []
 
     # Collecting to list then concat for ease
-    for image, c2w in zip(images, c2ws):
-        intrinsic = torch.tensor([
-            [focal.item(), 0, image.shape[1] // 2],
-            [0, focal.item(), image.shape[0] // 2],
-            [0, 0, 1],
-        ], dtype=torch.float32)
-
+    for image, c2w, intrinsic in zip(images, c2ws, intrinsics):
         o, d = create_rays(image.shape[0], image.shape[1], intrinsic, c2w)
 
         origins.append(o.flatten(0, 1))
@@ -46,38 +42,31 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, focal: Tensor) -> tuple[Tenso
     return origins, directions, colors
 
 
-def find_val_angles(c2ws: torch.Tensor, horizontal_partitions: int = 4, vertical_partitions: int = 2):
+def find_val_angles(c2ws: torch.Tensor, angle_count: int = 12):
     """Deterministically get validation angle indicies from extrinsic camera matrices
+
+    Takes angle_count many angles corresponding to equidistant points on the unit sphere, and finds closest angles
+    from them to get validation points, covering the scene evenly.
 
     Args:
         c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
-        horizontal_partitions: #angles to get along the horizontal plane
-        vertical_partitions: #angles to get along the vertical plane
+        angle_count: How many angles to choose
 
     Returns:
-        idxs (shape[horizontal_partitions * vertical_partitions]): Indicies of chosen validation angles
+        idxs (shape[angle_count]): Indicies of chosen validation angles
     """
     # Using spherical coordinates so choosing the middle of the partitions is easier
     positions = c2ws[:, :3, -1].clone()
     positions = F.normalize(positions, "fro", -1)
-    cam_theta = torch.atan2(positions[..., 1], positions[..., 0])
-    cam_phi = torch.arcsin(positions[..., 2])
+    cam_theta = torch.arccos(positions[..., 2])
+    cam_phi = torch.atan2(positions[..., 1], positions[..., 0])
 
-    # Taking middle of partitions to find closest camera angle
-    inclination_step = (cam_theta.max() - cam_theta.min()) / horizontal_partitions
-    azimuth_step = (cam_phi.max() - cam_phi.min()) / vertical_partitions
-    part_theta, part_phi = torch.meshgrid(
-        torch.arange(cam_theta.min() + inclination_step / 2, cam_theta.max(), inclination_step),
-        torch.arange(cam_phi.min() + azimuth_step / 2, cam_phi.max(), azimuth_step),
-        indexing="ij"
-    )
-
-    part_theta, part_phi = part_theta.flatten().unsqueeze(0), part_phi.flatten().unsqueeze(0)
-    cam_theta, cam_phi = cam_theta.unsqueeze(1), cam_phi.unsqueeze(1)
+    part_phi, part_theta = equidistance_rotations(angle_count)
+    cam_phi, cam_theta = cam_phi.unsqueeze(1), cam_theta.unsqueeze(1)
     # N,1 | 1,K -> N,K
     distances = torch.sqrt(
-        2 - 2 * torch.sin(cam_theta) * torch.sin(part_theta) * torch.cos(cam_phi - part_phi) +
-        torch.cos(cam_theta) * torch.cos(part_theta)
+        torch.arccos(torch.sin(cam_theta) * torch.sin(part_theta) * torch.cos(cam_phi - part_phi) +
+        torch.cos(cam_theta) * torch.cos(part_theta))
     )
 
     return torch.argmin(distances, dim=0)
@@ -104,66 +93,112 @@ def compute_near_far_planes(c2ws: Tensor) -> tuple[float, float]:
     # Distance to box corner is maximal at sqrt(3) for [-1, 1] bbox
     near = max(0.0, (min_dfc - torch.sqrt(torch.tensor(3))).item())
     far = (max_dfc + torch.sqrt(torch.tensor(3))).item()
-    print(near, far)
 
     return near, far
 
 
-def load_npz(path: str) -> tuple[Tensor, Tensor, Tensor]:
-    """Load numpy data
+class ObjectSource(StrEnum):
+    GSO = "GSO"
+    DTU = "DTU"
+    NeSy = "NeSy"
 
-    Args:
-        path: .npz file path
 
-    Returns:
-        tuple: tuple containing (images, c2ws, focal)
-        - **images**: *shape[N, H, W, 3]*: Images
-        - **c2ws**: *shape[N, 4, 4]*: Extrinisic camera matrices (Camera to World)
-        - **focal**: *shape[]*: Focal length
-    """
-    data = np.load(path)
+def load_gso_data(name: str, directory: str, sensor_count: int = 64, size: int = 800):
+    obj_dir: Path = (Path(directory) / ObjectSource.GSO.value / name).resolve()
+    npz_path: Path = obj_dir / "render.npz"
+
+    if not npz_path.exists():
+        if not obj_dir.is_dir():
+            raise ValueError(f"[GSO] Directory of object '{name}' doesn't exist")
+
+        images, c2ws, focal = render_gso_mesh(
+            obj_path=obj_dir,
+            sensor_count=sensor_count,
+            size=size,
+        )
+        np.savez_compressed(npz_path, images=images, c2ws=c2ws, focal=focal)
+
+    data = np.load(npz_path)
 
     images = torch.from_numpy(data["images"]).to(torch.float32)
     c2ws = torch.from_numpy(data["c2ws"]).to(torch.float32)
     focal = torch.from_numpy(data["focal"]).to(torch.float32)
+    intrinsics = create_intrinsic((focal, focal), (size, size)).unsqueeze(0).expand(c2ws.shape[0], -1, -1)
 
-    return images, c2ws, focal
+    return images, c2ws, intrinsics
 
 
-def load_obj_data(obj_name: str, sensor_count: int = 64, directory: str | None = None,
-                  verbose: bool = True) -> tuple[Tensor, Tensor, Tensor]:
+# This function is borrowed and modified from IDR: https://github.com/lioryariv/idr
+def load_K_Rt_from_P(P):
+    out = cv2.decomposeProjectionMatrix(P)
+    K, R, t = out[0], out[1], out[2]
+    intrinsic = np.astype(K / K[2, 2], np.float32)
+
+    pose = np.eye(4, dtype=np.float32)
+    pose[:3, :3] = R.transpose()
+    pose[:3, 3] = (t[:3] / t[3])[:, 0]
+
+    # transforming z-forward, y-down to z-backward, y-up
+    pose[:3, 1] *= -1
+    pose[:3, 2] *= -1
+    return pose, intrinsic
+
+
+def load_dtu_data(name: str, directory: str, masked: bool = True):
+    scan_dir: Path = (Path(directory) / ObjectSource.DTU.value / name).resolve()
+
+    f_images = (scan_dir / "image").glob("[0-9]*.png")
+    f_masks = (scan_dir / "mask").glob("[0-9]*.png")
+    cameras = np.load(scan_dir / "cameras.npz")
+
+    images, c2ws, intrinsics = [], [], []
+    for i, (f_img, f_mask) in enumerate(zip(sorted(f_images), sorted(f_masks))):
+        image = np.asarray(Image.open(f_img), dtype=np.float32) / 255.0
+        if masked:
+            alpha = np.asarray(Image.open(f_mask), dtype=np.float32) / 255.0
+            image = np.concat([image, alpha.mean(-1, keepdims=True)], axis=-1)
+
+        proj_matrix = cameras[f'world_mat_{i}'] @ cameras[f'scale_mat_{i}']
+        proj_matrix = proj_matrix[:3, :4]
+        c2w, intrinsic = load_K_Rt_from_P(proj_matrix)
+        
+        images.append(torch.from_numpy(image))
+        c2ws.append(torch.from_numpy(c2w))
+        intrinsics.append(torch.from_numpy(intrinsic))
+
+    images = torch.stack(images, dim=0)
+    c2ws = torch.stack(c2ws, dim=0)
+    intrinsics = torch.stack(intrinsics, dim=0)
+
+    return images, c2ws, intrinsics
+
+
+def load_data(name: str, source: ObjectSource = ObjectSource.GSO, directory: str | None = None,
+              **kwargs) -> tuple[Tensor, Tensor, Tensor]:
     """Loads object data from disk, or renders if doesn't exist, follows Google Scanned Objects mesh format
 
     Args:
-        obj_name: Name of object directory under directory
-        sensor_count: Number of view angles to render if rendering is required
+        name: Name of object directory under directory
+        source: Source of data (dataset idenfitifer based on enum)
         directory: Directory to search objects under, defaults to project_root/data
-        verbose: Print rendering info
+        **kwargs: Refer to load_SOURCE_data function arguments
 
     Returns:
         tuple: tuple containing (images, c2ws, focal)
         - **images**: *shape[N, H, W, 3]*: Images
         - **c2ws**: *shape[N, 4, 4]*: Extrinisic camera matrices (Camera to World)
-        - **focal**: *shape[]*: Focal length
+        - **intrinsics**: *shape[N, 3, 3]*: Intrinsic camera matrices
     """
     directory = directory or f"{__file__}/../../../data"
 
-    npz_path: Path = (Path(directory) / f"{obj_name}.npz").resolve().absolute()
-    if not npz_path.exists():
-        obj_path: Path = (Path(directory) / "raw_objects" / obj_name).resolve().absolute()
-        if not obj_path.is_dir():
-            raise ValueError(f"Directory of object '{obj_name}' doesn't exist")
+    match source:
+        case ObjectSource.GSO:
+            data = load_gso_data(name, directory, **kwargs)
+        case ObjectSource.DTU:
+            data = load_dtu_data(name, directory, **kwargs)
+        case ObjectSource.NeSy:
+            raise NotImplementedError(source)
+        case _:
+            raise ValueError(f"Unknown ObjectSource: {source}")
 
-        if verbose:
-            print(f"Render of object '{obj_name}' not found, rendering {sensor_count} angles")
-
-        images, c2ws, focal = render_mesh(
-            obj_path=obj_path,
-            sensor_count=sensor_count
-        )
-        np.savez_compressed(npz_path, images=images, c2ws=c2ws, focal=focal)
-
-        if verbose:
-            print(f"Render of '{obj_name}' complete")
-
-    return load_npz(npz_path)
+    return data
