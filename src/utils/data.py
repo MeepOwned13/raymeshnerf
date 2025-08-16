@@ -7,7 +7,7 @@ from enum import StrEnum
 from PIL import Image
 import cv2
 
-from .rays import create_rays, create_intrinsic, equidistance_rotations
+from .rays import create_rays, create_intrinsic, equidistance_rotations, look_at
 from .mesh_render import render_gso_mesh
 
 
@@ -45,8 +45,8 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, intrinsics: Tensor) -> tuple[
 def find_val_angles(c2ws: torch.Tensor, angle_count: int = 12):
     """Deterministically get validation angle indicies from extrinsic camera matrices
 
-    Takes angle_count many angles corresponding to equidistant points on the unit sphere, and finds closest angles
-    from them to get validation points, covering the scene evenly.
+    Takes angle_count many angles corresponding to equidistant points on the unit sphere, and finds closest cameras
+    (normalized to unit sphere) from them to get validation points, covering the scene evenly.
 
     Args:
         c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
@@ -55,19 +55,15 @@ def find_val_angles(c2ws: torch.Tensor, angle_count: int = 12):
     Returns:
         idxs (shape[angle_count]): Indicies of chosen validation angles
     """
-    # Using spherical coordinates so choosing the middle of the partitions is easier
-    positions = c2ws[:, :3, -1].clone()
-    positions = F.normalize(positions, "fro", -1)
-    cam_theta = torch.arccos(positions[..., 2])
-    cam_phi = torch.atan2(positions[..., 1], positions[..., 0])
+    cam_pos = c2ws[:, :3, -1].clone()
+    cam_pos = torch.nn.functional.normalize(cam_pos, "fro", -1)
 
-    part_phi, part_theta = equidistance_rotations(angle_count)
-    cam_phi, cam_theta = cam_phi.unsqueeze(1), cam_theta.unsqueeze(1)
-    # N,1 | 1,K -> N,K
-    distances = torch.sqrt(
-        torch.arccos(torch.sin(cam_theta) * torch.sin(part_theta) * torch.cos(cam_phi - part_phi) +
-        torch.cos(cam_theta) * torch.cos(part_theta))
-    )
+    part_pos = torch.zeros((angle_count, 3), dtype=torch.float32)
+    for i, (phi, theta) in enumerate(zip(*equidistance_rotations(angle_count))):
+        part_pos[i] = look_at(1, phi, theta)[:3, -1]
+
+    # N,1,3 | 1,K,3 -> N,K
+    distances = torch.sqrt(torch.sum(torch.pow(cam_pos.unsqueeze(1) - part_pos.unsqueeze(0), 2), dim=-1))
 
     return torch.argmin(distances, dim=0)
 
