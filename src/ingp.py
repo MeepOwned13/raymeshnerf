@@ -8,13 +8,14 @@ from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, Ea
 import utils as U
 import utils.lutils as LU
 
+from utils.eff_distloss import eff_distloss
 
 class LInstantNGP(LU.LVolume):
     def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
                  min_res: int = 16, max_res: int = 512, max_res_dense: int = 256, f_res: int = 128,
                  f_sigma_init: float = 5.0, f_sigma_threshold: float = 2.956033378,
                  f_update_decay: float = 0.95, f_update_selection_rate: float = 0.5,
-                 **kwargs):
+                 distortion_loss_weight: float = 1e-2, **kwargs):
         """Init
 
         Default f_sigma_threshold is chosen based on https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf,
@@ -55,8 +56,8 @@ class LInstantNGP(LU.LVolume):
         self.background_noise_range = [0.0, 1.0]
 
     def render_rays(self, origins: Tensor, directions: Tensor, near: float | None = None,
-                           far: float | None = None, deterministic: bool = True,
-                            **kwargs) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+                    far: float | None = None, deterministic: bool = True,
+                    **kwargs) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         near = self.hparams.get("near", near) or self.trainer.datamodule.hparams.near
         far = self.hparams.get("far", far) or self.trainer.datamodule.hparams.far
 
@@ -73,7 +74,24 @@ class LInstantNGP(LU.LVolume):
         return rgb, depth, acc
     
     def calculate_loss(self, origins, directions, colors):
-        p_rgb, _, p_alpha = self.render_rays(origins, directions, deterministic=False)
+        near = self.hparams.get("near", self.trainer.datamodule.hparams.near)
+        far = self.hparams.get("far", self.trainer.datamodule.hparams.far)
+
+        points, expanded_directions, depths = U.rays.sample_ray_uniformally(
+            origins=origins,
+            directions=directions,
+            near=near,
+            far=far,
+            num_samples=2**10,
+            perturb=True,
+        )
+        p_rgbs = self.nerf(points, expanded_directions)
+        p_rgb, _, p_alpha, _, p_weights = U.rays.render_rays(rgbs=p_rgbs, depths=depths, far=far)
+
+        # Distortion loss
+        distances = depths[..., 1:] - depths[..., :-1]
+        distances = torch.cat([distances, torch.nn.functional.relu(far - depths[..., -1:])], -1)
+        distloss = eff_distloss(p_weights, depths, distances)
 
         if colors.shape[-1] == 4:  # RGBA, apply background noise to skew towards low density background
             colors, alphas = colors[..., :3], colors[..., 3:4]
@@ -85,7 +103,8 @@ class LInstantNGP(LU.LVolume):
             loss = self.lossf(mixed_pred_colors, mixed_colors)
         else:  # RGB
             loss = self.lossf(p_rgb, colors)
-        return loss
+
+        return loss + distloss * self.hparams.distortion_loss_weight
     
     def configure_optimizers(self):
         optimizer = torch.optim.RAdam([
@@ -98,7 +117,7 @@ class LInstantNGP(LU.LVolume):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": torch.optim.lr_scheduler.ExponentialLR(
-                    optimizer, gamma=0.85
+                    optimizer, gamma=0.9
                 ),
             }
         }
@@ -110,21 +129,21 @@ if __name__ == '__main__':
 
     L.seed_everything(42)
 
-    data = LU.NeRFData("scan24", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_indices=[-16])
-    module = LInstantNGP()
+    data = LU.NeRFData("scan24", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_indices=[1, -16], keep_val_in_train=True)
+    module = LInstantNGP(max_res=2048)
     logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}")
 
     trainer = L.Trainer(
-        max_epochs=50, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
-        accumulate_grad_batches=2**4, limit_train_batches=2**12,
+        max_epochs=50, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger, num_sanity_val_steps=1,
+        accumulate_grad_batches=2**0, limit_train_batches=2**12,
         callbacks=[
-            LU.OGFilterCallback(16, 32),
+            LU.OGFilterCallback(16 * 2**4, 32),
             LearningRateMonitor(logging_interval="epoch"),
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1,
                             save_weights_only=True),
             ModelCheckpoint(filename="end_{epoch}", save_on_train_epoch_end=True, every_n_epochs=1),
             EarlyStopping(monitor="val_psnr", mode="max", patience=2, min_delta=0.05)
-        ]
+        ], 
     )
 
     trainer.fit(

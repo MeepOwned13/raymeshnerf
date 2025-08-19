@@ -15,7 +15,7 @@ from . import data, rays
 
 class NeRFData(L.LightningDataModule):
     def __init__(self, name: str, source: data.ObjectSource, batch_size: int = 1024, val_angle_count: int | None = None,
-                 val_angle_indices: list[int] | None = None):
+                 val_angle_indices: list[int] | None = None, keep_val_in_train: bool = False):
         """Init
 
         Args:
@@ -24,6 +24,7 @@ class NeRFData(L.LightningDataModule):
             val_angle_count: How many equidistant validation angles to choose (closest to equidistant angles),
                 exclusive with `val_angle_indices`
             val_angle_indices: Which indices to choose from the images for validation, exclusive with `val_angle_count`
+            keep_val_in_train: Don't remove validation images from training set (useful for monitoring train images)
         """
         super().__init__()
 
@@ -44,19 +45,24 @@ class NeRFData(L.LightningDataModule):
         return data.load_data(self.hparams.name, self.hparams.source)
 
     def setup(self, stage: str):
-        images, c2ws, intrinsics = self.load_from_file()
-        self.hparams.near, self.hparams.far = data.compute_near_far_planes(c2ws=c2ws)
-        self.save_hyperparameters()
+        self.images, self.c2ws, self.intrinsics = self.load_from_file()
+        if self.hparams.get("near", None) is None or self.hparams.get("far", None) is None:
+            self.hparams.near, self.hparams.far = data.compute_near_far_planes(c2ws=self.c2ws)
+            self.save_hyperparameters()
 
         # Swapping between automatic choice of "equidistant angles" and pre-set indices
         if self.hparams.val_angle_indices:
             val_idxs = self.hparams.val_angle_indices
         else:
-            val_idxs = data.find_val_angles(c2ws=c2ws, angle_count=self.hparams.val_angle_count)
-        val_imgs, val_c2ws, val_intrinsics = images[val_idxs], c2ws[val_idxs], intrinsics[val_idxs]
+            val_idxs = data.find_val_angles(c2ws=self.c2ws, angle_count=self.hparams.val_angle_count)
+        val_imgs = self.images[val_idxs]
+        val_c2ws = self.c2ws[val_idxs]
+        val_intrinsics = self.intrinsics[val_idxs]
 
-        train_idxs = [i for i in range(images.shape[0]) if i not in val_idxs]
-        train_imgs, train_c2ws, train_intrinsics = images[train_idxs], c2ws[train_idxs], intrinsics[train_idxs]
+        train_idxs = [i for i in range(self.images.shape[0]) if (i not in val_idxs) or self.hparams.keep_val_in_train]
+        train_imgs = self.images[train_idxs]
+        train_c2ws = self.c2ws[train_idxs]
+        train_intrinsics = self.intrinsics[train_idxs]
 
         if stage == "fit":
             self.train_rays: TensorDataset = TensorDataset(
@@ -106,7 +112,6 @@ class LVolume(L.LightningModule):
             raise NotImplementedError(f"{self.__class__} must have .nerf attribute defined")
         if stage == "fit":
             self.lossf = MSELoss()
-        return super().setup(stage)
     
     def render_rays(self, origins: Tensor, directions: Tensor, near: float | None = None, far: float | None = None):
         """Render rays ready for display (e.g. don't return separate coarse, fine colors)

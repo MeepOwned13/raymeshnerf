@@ -5,13 +5,13 @@ from matplotlib import pyplot as plt
 
 
 # In accordance with mitsuba's conventions
-def look_at(radius: float, theta: Tensor, phi: Tensor) -> Tensor:
+def look_at(radius: float, phi: Tensor, theta: Tensor) -> Tensor:
     """Construct Look At matrix for [0, 0, 0] target
 
     Args:
         radius: Distance to target, aka. radius of sphere the camera is laying on
-        theta (shape[]): Vertical rotation in radians
         phi (shape[]): Horizontal rotation in radians
+        theta (shape[]): Vertical rotation in radians
 
     Returns:
         look_at shape([4, 4]): Look at matrix in homogeneous coordinates
