@@ -6,6 +6,9 @@ from pathlib import Path
 from enum import StrEnum
 from PIL import Image
 import cv2
+from copy import copy
+import open3d as o3d
+import matplotlib.pyplot as plt
 
 from .rays import create_rays, create_intrinsic, equidistance_rotations, look_at
 from .mesh_render import render_gso_mesh
@@ -91,6 +94,60 @@ def compute_near_far_planes(c2ws: Tensor) -> tuple[float, float]:
     far = (max_dfc + torch.sqrt(torch.tensor(3))).item()
 
     return near, far
+
+
+def dbscan_and_connected_merge(cloud: o3d.geometry.PointCloud, eps: float = 0.01, merge_distance: float = 0.005,
+                               iters: int = 5, color_cloud: bool = False) -> np.ndarray:
+    """Apply DBScan clustering and merge connected clusters (by minimal distance between them)
+
+    This algorithm is non deterministic in selecting the next cluster for merging, so multiple iterations are required.
+    The runtime can explode when looking at large clouds so make sure to downsample if the function doesn't run in a
+    reasonable time.
+
+    Args:
+        cloud: PointCloud to apply dbscan and connection merging to
+        eps: Epsilon for dbscan (o3d.geometry.PointCloud.cluster_dbscan)
+        merge_distance: Max distance when merging of clusters still happens
+        iters: How many iterations to run, set it higher if connected close areas still get separately labeled
+        color_cloud: Apply a coloring based on labels to cloud?
+    
+    Returns:
+        labels: Label per point for the original cloud
+    """
+    labels = np.array(cloud.cluster_dbscan(eps=eps, min_points=1))
+    relabels = labels[labels != -1]  # DBScan identified noise
+    # Everything "plays" that merged things into itself
+    playing = set(np.unique(labels).tolist())
+    for _ in range(iters):
+        new_playing = set()
+
+        while len(playing) != 0:
+            dst = playing.pop()
+            dst_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(cloud.points)[relabels == dst]))
+
+            for src in copy(playing):  # Copy to avoid changing iterator while iterating
+                src_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(cloud.points)[relabels == src]))
+                mindist = np.asarray(dst_cloud.compute_point_cloud_distance(src_cloud)).min()
+
+                if mindist <= merge_distance:
+                    playing.remove(src)
+                    dst_cloud = dst_cloud + src_cloud
+                    relabels[relabels == src] = dst
+
+            # Played if it's close to anything, if it isn't then it'll never be
+            new_playing.add(dst)
+
+        playing = new_playing
+
+    _, relabels = np.unique(relabels, return_inverse=True)
+    labels[labels != -1] = relabels  # Keep identified noise labels
+
+    if color_cloud:
+        colors = plt.get_cmap("tab20")(labels / (labels.max() if labels.max() > 0 else 1))
+        colors[labels < 0] = 0
+        cloud.colors = o3d.utility.Vector3dVector(colors[:, :3])
+
+    return labels
 
 
 class ObjectSource(StrEnum):
