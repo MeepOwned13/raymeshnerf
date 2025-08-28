@@ -176,3 +176,5 @@ data/*
 lightning_logs/
 deprecated_lightning_logs/
 hidden_*
+bkp_logs/*
+bkp_*

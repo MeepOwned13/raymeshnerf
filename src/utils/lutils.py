@@ -244,7 +244,7 @@ class LVolume(L.LightningModule):
             # fixed step size if sigma is below a limit (aka. empty space areas)
             grad_step = sigma > sigma_limit
             grad = masked_depth.grad
-            step_size = grad * gamma
+            step_size = (grad * gamma).clamp(-non_grad_step_size / 2, non_grad_step_size / 2)
             step_size[~grad_step] = non_grad_step_size
 
             # Stepping stops if:
@@ -261,8 +261,8 @@ class LVolume(L.LightningModule):
             depth[in_progress_mask] = masked_depth[mask_update] + step_size[mask_update]
 
             iters += 1
-
-        return depth, ~in_progress_mask
+        
+        return depth.detach(), ~in_progress_mask
     
     def estimate_normals(self, points: torch.Tensor, silence_input_size_warning: bool = False) -> torch.Tensor:
         """Estimate normals from points as the direction of largest negative gradient

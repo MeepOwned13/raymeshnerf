@@ -1,7 +1,9 @@
 """
 Based on code from pure-torch-ngp (MIT License): https://github.com/cheind/pure-torch-ngp
 
-It includes no major modifications from the original, it is a very nice implementation, thanks cheind!
+Modifications:
+- Added tv_loss to MultiLevelHybridHashEncoding, works by random sampling of voxels per level and summing of Total
+  Variation loss at each level
 """
 
 from dataclasses import dataclass
@@ -246,6 +248,46 @@ class MultiLevelHybridHashEncoding(torch.nn.Module):
         w[~m] = 0.0
         ids[~m] = 0
         return ids, w
+    
+    def tv_loss(self, samples: int) -> torch.Tensor:
+        """Compute anisotropic Total Variation loss by random sampling in space
+
+        Total Variation loss is calculated for a voxel as the difference of its embeddings from the embeddings of voxels
+        at x+1, y+1 and z+1. Used to converge to smoother embeddings at neighboring voxels.
+        
+        Args:
+            samples: How many samples to take per level
+
+        Returns:
+            tv_loss (shape[]): Total Variation loss
+        """
+        device = self.level_emb_matrix0.device
+        total_tv = torch.tensor(0, dtype=torch.float32, device=device)
+        for i, li in enumerate(self.level_infos):
+            with torch.no_grad():
+                voxels = torch.randint(
+                    0, li.res - 1, (samples, 3), dtype=torch.int32, device=device
+                ).unique(sorted=False, dim=0)
+
+                vx = voxels + torch.tensor([[1, 0, 0]], dtype=torch.int32, device=device)
+                vy = voxels + torch.tensor([[0, 1, 0]], dtype=torch.int32, device=device)
+                vz = voxels + torch.tensor([[0, 0, 1]], dtype=torch.int32, device=device)
+
+            embeddings = getattr(self, "level_emb_matrix" + str(i))
+            if li.dense:
+                embeddings = embeddings.permute(1, 0)
+
+            v_emb = embeddings[li.fn_hash(voxels, li.shape, li.n_encodings)]
+            vx_emb = embeddings[li.fn_hash(vx, li.shape, li.n_encodings)]
+            vy_emb = embeddings[li.fn_hash(vy, li.shape, li.n_encodings)]
+            vz_emb = embeddings[li.fn_hash(vz, li.shape, li.n_encodings)]
+
+            # Anisotropic Total Variation loss
+            tv = torch.abs(v_emb - vx_emb) + torch.abs(v_emb - vy_emb) + torch.abs(v_emb - vz_emb)
+            tv = tv.sum(-1).mean(0)
+            total_tv += tv
+
+        return total_tv
 
 
 def _compute_resolutions(
