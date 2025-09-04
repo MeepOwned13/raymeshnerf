@@ -178,3 +178,4 @@ deprecated_lightning_logs/
 hidden_*
 bkp_logs/*
 bkp_*
+error_vis

@@ -45,7 +45,7 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, intrinsics: Tensor) -> tuple[
     return origins, directions, colors
 
 
-def find_val_angles(c2ws: torch.Tensor, angle_count: int = 12):
+def find_val_angles(c2ws: torch.Tensor, angle_count: int = 12) -> torch.Tensor:
     """Deterministically get validation angle indicies from extrinsic camera matrices
 
     Takes angle_count many angles corresponding to equidistant points on the unit sphere, and finds closest cameras
@@ -69,6 +69,32 @@ def find_val_angles(c2ws: torch.Tensor, angle_count: int = 12):
     distances = torch.sqrt(torch.sum(torch.pow(cam_pos.unsqueeze(1) - part_pos.unsqueeze(0), 2), dim=-1))
 
     return torch.argmin(distances, dim=0)
+
+
+def find_rmn_angles(c2ws: torch.Tensor, angle_count: int = 8) -> list[int]:
+    """Deterministically get reconstruction angle indicies from extrinsic camera matrices using FPS
+
+    Utilizes Farthest Point Sampling for angle choices, first angle is chosen as the farthest camera position from
+    the centroid of camera points (mean of coordinates).
+
+    Args:
+        c2ws (shape[N, 4, 4]): Extrinisic camera matrices (Camera to World)
+        angle_count: How many angles to choose
+
+    Returns:
+        idxs (len=angle_count): Indicies of chosen reconstruction angles
+    """
+    cam_pos = c2ws[:, :3, -1].clone()
+    picked = [torch.sqrt(torch.sum(torch.pow(cam_pos - cam_pos.mean(), 2), -1)).argmax().item()]
+    distances = torch.full((cam_pos.shape[0],), torch.inf, dtype=torch.float32)
+
+    for _ in range(1, angle_count):
+        last = cam_pos[picked[-1]]
+        distance_to_last = torch.sqrt(torch.sum(torch.pow(cam_pos - last, 2), -1))
+        distances = torch.minimum(distances, distance_to_last)
+        picked.append(torch.argmax(distances).item())
+
+    return picked
 
 
 def compute_near_far_planes(c2ws: Tensor) -> tuple[float, float]:
