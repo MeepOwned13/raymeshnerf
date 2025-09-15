@@ -1,3 +1,7 @@
+# Fix for draw_geometries crashing on Wayland
+import os
+os.environ["XDG_SESSION_TYPE"] = "x11"
+
 import open3d as o3d
 import argparse
 from pathlib import Path
