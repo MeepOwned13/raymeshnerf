@@ -14,7 +14,7 @@ class LInstantNGP(LU.LVolume):
     def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
                  min_res: int = 16, max_res: int = 2048, max_res_dense: int = 256, f_res: int = 128,
                  f_sigma_init: float = 5.0, f_sigma_threshold: float = 2.956033378, f_update_decay: float = 0.95,
-                 f_update_selection_rate: float = 0.5, dl_tv_loss_decay_end: int = 2**13 + 2**12,
+                 f_update_selection_rate: float = 0.5, dl_tv_loss_decay_end: int = 2**13,
                  distortion_loss_weight_start: float = 1e-4, distortion_loss_weight_end: float = 1e-2,
                  tv_loss_weight_start: float = 1e-6, tv_loss_weight_end: float = 1e-8, 
                  ray_tv_sample_count: int = 2 ** 8, ray_tv_loss_mult: float = 20.0, **kwargs):
@@ -40,7 +40,7 @@ class LInstantNGP(LU.LVolume):
             dl_tv_loss_decay_end: Linear decay ending batch number for distortion and tv loss,
                 tv loss isn't applied on subsequent batches
             distortion_loss_weight_start: Starting Distortion loss weight
-            distortion_loss_weight_end: Ending Distortion loss weight, scaled linearly even after `dl_tv_loss_decay_end`
+            distortion_loss_weight_end: Ending Distortion loss weight, scaled linearly
             tv_loss_weight_start: Starting Total Variation loss weight
             tv_loss_weight_end: Ending Total Variation loss weight at `dl_tv_loss_decay_end`
             ray_tv_sample_count: Count of sample per ray for additional TV loss
@@ -107,26 +107,26 @@ class LInstantNGP(LU.LVolume):
         distances = torch.cat([distances, torch.nn.functional.relu(far - depths[..., -1:])], -1)
         distloss = eff_distloss(p_weights, depths, distances)
 
-        if colors.shape[-1] == 4:  # RGBA, apply background noise to skew towards low density background
+        # Background noise, skews towards 0 alpha in GT 0 alpha for RGBA, skews towards 1 alpha in RGB scenarios
+        noise = torch.empty_like(p_rgb).uniform_(self.background_noise_range[0], self.background_noise_range[1])
+        mixed_pred_colors = p_rgb * p_alpha + noise * (1 - p_alpha)
+
+        if colors.shape[-1] == 4:  # RGBA
             colors, alphas = colors[..., :3], colors[..., 3:4]
-            noise = torch.empty_like(colors).uniform_(self.background_noise_range[0], self.background_noise_range[1])
-
             mixed_colors = colors * alphas + noise * (1 - alphas)
-            mixed_pred_colors = p_rgb * p_alpha + noise * (1 - p_alpha)
-
             loss = self.lossf(mixed_pred_colors, mixed_colors)
         else:  # RGB
-            loss = self.lossf(p_rgb * p_alpha, colors)
+            loss = self.lossf(mixed_pred_colors, colors)
 
         # Distortion loss
         ds_loss_weight = self.hparams.distortion_loss_weight_start -\
-            self.trainer.global_step / self.hparams.dl_tv_loss_decay_end *\
+            min(1.0, self.trainer.global_step / self.hparams.dl_tv_loss_decay_end) *\
             (self.hparams.distortion_loss_weight_start - self.hparams.distortion_loss_weight_end)
         loss += distloss * ds_loss_weight
 
         if self.trainer.global_step <= self.hparams.dl_tv_loss_decay_end:
             tv_loss_weight = self.hparams.tv_loss_weight_start -\
-                self.trainer.global_step / self.hparams.dl_tv_loss_decay_end *\
+                min(1.0, self.trainer.global_step / self.hparams.dl_tv_loss_decay_end) *\
                 (self.hparams.tv_loss_weight_start - self.hparams.tv_loss_weight_end)
             loss += self.nerf.mlhhe.tv_loss(batch_size * 2) * tv_loss_weight
 
@@ -176,12 +176,23 @@ class LInstantNGP(LU.LVolume):
             {"params": self.nerf.feature_mlp.parameters(), "weight_decay": 10**-6, "eps": 1e-15}
         ], lr=1e-2, betas=(0.9, 0.99))
 
+        # As per the paper of INGP
+        initial_steps = 20_000
+        decay_steps = 10_000
+        decay_factor = 0.33
+        def lr_lambda(step):
+            if step < initial_steps:
+                return 1.0
+            # Calculate how many decay steps have occurred
+            decay_count = 1 + (step - initial_steps) // decay_steps
+            return decay_factor ** decay_count
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": torch.optim.lr_scheduler.ExponentialLR(
-                    optimizer, gamma=0.9
-                ),
+                "scheduler": torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda),
+                "interval": "step",
+                "frequency": 1,
             }
         }
 
@@ -191,12 +202,13 @@ if __name__ == '__main__':
         torch.set_float32_matmul_precision('medium')
     L.seed_everything(42, workers=True)
 
-    data = LU.NeRFData("scan24", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_indices=[1, -16], keep_val_in_train=True)
+    data = LU.NeRFData("scan97", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_count=2,
+                       val_angle_equidistant=False, keep_val_in_train=True)
     module = LInstantNGP()
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}_m")
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}_m_retr")
 
     trainer = L.Trainer(
-        max_epochs=15, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
+        max_epochs=20, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
         accumulate_grad_batches=2**2, limit_train_batches=2**12 * 2**2,
         callbacks=[
             LU.OGFilterCallback(16 * 2**4, 32),
@@ -204,7 +216,7 @@ if __name__ == '__main__':
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1,
                             save_weights_only=True),
             ModelCheckpoint(filename="end_{epoch}", save_on_train_epoch_end=True, every_n_epochs=1),
-            EarlyStopping(monitor="val_psnr", mode="max", patience=2, min_delta=0.05)
+            EarlyStopping(monitor="val_psnr", mode="max", patience=4, min_delta=0.0)
         ],
         num_sanity_val_steps=0,  # Here to reduce experiment time, make sure to set it to -1 or >0 for new data(sets)
     )

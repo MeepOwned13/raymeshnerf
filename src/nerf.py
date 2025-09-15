@@ -119,19 +119,19 @@ class LNeRF(LU.LVolume):
             rgbs=fine_rgbs, depths=fine_depths, far=far
         )
 
-        if colors.shape[-1] == 4:  # RGBA, apply background noise to skew towards low density background
+        # Background noise, skews towards 0 alpha in GT 0 alpha for RGBA, skews towards 1 alpha in RGB scenarios
+        noise = torch.empty_like(coarse_colors).uniform_(self.background_noise_range[0], self.background_noise_range[1])
+        mixed_coarse_colors = coarse_colors * coarse_alphas + noise * (1 - coarse_alphas)
+        mixed_fine_colors = fine_colors * fine_alphas + noise * (1 - fine_alphas)
+
+        if colors.shape[-1] == 4:  # RGBA
             colors, alphas = colors[..., :3], colors[..., 3:4]
-            noise = torch.empty_like(colors).uniform_(self.background_noise_range[0], self.background_noise_range[1])
-
             mixed_colors = colors * alphas + noise * (1 - alphas)
-            mixed_coarse_colors = coarse_colors * coarse_alphas + noise * (1 - coarse_alphas)
-            mixed_fine_colors = fine_colors * fine_alphas + noise * (1 - fine_alphas)
-
             loss = (
                 self.lossf(mixed_coarse_colors, mixed_colors) + self.lossf(mixed_fine_colors, mixed_colors)
             )
         else:  # RGB
-            loss = (self.lossf(coarse_colors, colors) + self.lossf(fine_colors, colors))
+            loss = (self.lossf(mixed_coarse_colors, colors) + self.lossf(mixed_fine_colors, colors))
         return loss
 
     def configure_optimizers(self):
