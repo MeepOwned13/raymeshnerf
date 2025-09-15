@@ -80,6 +80,8 @@ if __name__ == '__main__':
     parser.add_argument("log_name", help="Name of directory containing model under lightning_logs")
     parser.add_argument("-v", "--visualize", action="store_true", help="Visualize final point cloud?")
     parser.add_argument("-p", "--postfix", type=str, help="String to add after filename")
+    parser.add_argument("-r", "--save_raw", action="store_true",
+                        help="Save raw outputs (origin, direction, depth, sp_mask)")    
     args = parser.parse_args()
 
     proj_dir = Path(f"{__file__}/../../").resolve()
@@ -88,6 +90,7 @@ if __name__ == '__main__':
     log_path = (proj_dir / "lightning_logs" / args.log_name).resolve()
     
     model, data = load_model_and_data(log_path)
+    datadir = (proj_dir / "data" / data.hparams.source / data.hparams.name).resolve()
 
     idxs = U.data.find_rmn_angles(data.c2ws, angle_count=8)
     origin, direction = get_origin_direction_c2w_intrinsic((1200, 1600), data.c2ws[idxs], data.intrinsics[idxs])
@@ -97,16 +100,6 @@ if __name__ == '__main__':
     print(f"Running RayMeshNeRF Surface Point extraction for {dl.dataset.tensors[0].shape[0]:_d} rays")
     rm_depth, sp_mask = [], []
     for o, d in tqdm(dl, total=len(dl), unit="batch", postfix="batch_size=2^19"):
-        """
-        d, sm = model.locate_density_gradient_based_surface_depth(
-            o, d,
-            sigma_limit=5.912066757, # sigma_limit=5.912066757,  # 0.01 / sqrt(3) * 1024
-            gamma=1e-8,  # gamma=1e-9,
-            non_grad_step_size=0.0016532793661392217, # non_grad_step_size=0.001691456,  # sqrt(3) / 1024
-            min_step_size=1e-6,  # min_step_size=1 / 1024,  # 2 / (2 * sample count)
-            max_iters=2**11 + 2**10,  # max_iters=2**12,  # 2*2048 as non_grad_step_size requires a min of 2048 steps from near to far
-        )
-        """
         d, sm = model.locate_density_gradient_based_surface_depth(
             o, d,
             sigma_limit=5.912066757, # sigma_limit=5.912066757,  # 0.01 / sqrt(3) * 1024
@@ -121,26 +114,46 @@ if __name__ == '__main__':
         rm_depth.append(d)
         sp_mask.append(sm)
 
+    #temp = torch.load(datadir / "rmn_raw.pt")
+    #origin, direction, rm_depth, sp_mask = temp["origin"], temp["direction"], temp["rm_depth"], temp["sp_mask"]
+
     rm_depth, sp_mask = torch.cat(rm_depth, 0).reshape(shape + (1,)), torch.cat(sp_mask, 0).reshape(shape)
+    if args.save_raw:
+        raw_path = datadir / f"rmn_raw{f'_{args.postfix}' if args.postfix else ""}.pt"
+        torch.save({
+            "origin": origin,
+            "direction": direction,
+            "rm_depth": rm_depth,
+            "sp_mask": sp_mask,
+        }, raw_path)
     rm_depth_mask = ((rm_depth > model.hparams.near) & (rm_depth <= model.hparams.far)).squeeze(-1)
     rm_points = origin[rm_depth_mask] + rm_depth[rm_depth_mask] * direction[rm_depth_mask]
 
     print(f"Points within depth limits: {rm_points.shape[0]:_d}"
           f", of which {rm_points[sp_mask[rm_depth_mask]].shape[0]:_d} are Surface Points")
-
+    
     bbox_mask = (rm_points.abs() <= 1.0).all(-1)
     point_cloud = cloud_from_tensor(rm_points[bbox_mask])
     print(f"After filtering bounding box [-1,1] outliers: {point_cloud}")
 
-    point_cloud = point_cloud.voxel_down_sample(0.002)
-    print(f"After voxel downsample to 0.002 voxel size: {point_cloud}")
+    cloud_path = datadir / f"rmn_cloud_raw{f'_{args.postfix}' if args.postfix else ""}.ply"
+    o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
+    print(f"Raw Point cloud written to {cloud_path}")
 
-    print(f"Running DBScan clustering and Connectivity Merge filter...")
-    labels = U.data.dbscan_and_connected_merge(point_cloud, eps=0.01, iters=3)
-    v, c = np.unique_counts(labels)
-    obj_label = v[c.argmax()]
-    point_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(point_cloud.points)[labels == obj_label]))
-    print(f"After DBScan clustering and Connectivity Merge filter: {point_cloud}")
+    with torch.no_grad():
+        sigmas = []
+        sigma_points = DataLoader(
+            torch.from_numpy(np.asarray(point_cloud.points, dtype=np.float32)),
+            batch_size=2**19, shuffle=False
+        )
+        for sp in sigma_points:
+            sigmas.append(model.nerf(sp.to(model.device), None, skip_colors=True).cpu())
+        sigmas = torch.cat(sigmas, dim=0).squeeze(-1)
+
+    sigmas = sigmas.numpy()
+    mask = sigmas < np.quantile(sigmas, 0.75)
+    point_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(point_cloud.points)[mask]))
+    print(f"After filtering sigma < 0.75 quantile: {point_cloud}")
 
     print(f"Calculating normal vectors...")
     normals = []
@@ -152,9 +165,21 @@ if __name__ == '__main__':
         normals.append(model.estimate_normals(nps).cpu())
     normals = torch.cat(normals, dim=0)
     point_cloud.normals = o3d.utility.Vector3dVector(normals)
-    point_cloud.paint_uniform_color([0.5, 0.5, 0.5])
 
-    datadir = (proj_dir / "data" / data.hparams.source / data.hparams.name).resolve()
+    point_cloud = point_cloud.voxel_down_sample(0.002)
+    print(f"After voxel downsample to 0.002 voxel size: {point_cloud}")
+
+    print(f"Running DBScan clustering and Connectivity Merge filter...")
+    labels = U.data.dbscan_and_connected_merge(point_cloud, eps=0.01, iters=3)
+    v, c = np.unique_counts(labels)
+    obj_label = v[c.argmax()]
+
+    normals = np.asarray(point_cloud.normals)[labels == obj_label]
+    point_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(point_cloud.points)[labels == obj_label]))
+    point_cloud.normals = o3d.utility.Vector3dVector(normals)
+    point_cloud.paint_uniform_color([0.5, 0.5, 0.5])
+    print(f"After DBScan clustering and Connectivity Merge filter: {point_cloud}")
+
     if data.hparams.source == U.data.ObjectSource.DTU:
         scaler = np.load(datadir / "cameras.npz")["scale_mat_0"]
         point_cloud.transform(scaler)

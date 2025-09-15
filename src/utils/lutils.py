@@ -16,24 +16,17 @@ from . import data, rays
 
 class NeRFData(L.LightningDataModule):
     def __init__(self, name: str, source: data.ObjectSource, batch_size: int = 1024, val_angle_count: int | None = None,
-                 val_angle_indices: list[int] | None = None, keep_val_in_train: bool = False):
+                 val_angle_equidistant: bool = False, keep_val_in_train: bool = False):
         """Init
 
         Args:
             name: Name of object in data directory
             batch_size: #Rays in a batch
-            val_angle_count: How many equidistant validation angles to choose (closest to equidistant angles),
-                exclusive with `val_angle_indices`
-            val_angle_indices: Which indices to choose from the images for validation, exclusive with `val_angle_count`
+            val_angle_count: How many equidistant validation angles to choose
+            val_angle_equidistant: Use equidistant val angles, or farthest point sampled ones (better for non 360)
             keep_val_in_train: Don't remove validation images from training set (useful for monitoring train images)
         """
         super().__init__()
-
-        if val_angle_count is not None and val_angle_indices is not None:
-            raise ValueError("Only one of `val_angle_count` or `val_angle_indices` can be specified")
-        if val_angle_count is None and val_angle_indices is None:
-            raise ValueError("Either `val_angle_count` or `val_angle_indices` must be specified")
-
         self.save_hyperparameters()
         # Making sure it is in the ObjectSource Enum for function calls
         self.hparams.source = data.ObjectSource(self.hparams.source)
@@ -52,10 +45,10 @@ class NeRFData(L.LightningDataModule):
             self.save_hyperparameters()
 
         # Swapping between automatic choice of "equidistant angles" and pre-set indices
-        if self.hparams.val_angle_indices:
-            val_idxs = self.hparams.val_angle_indices
+        if self.hparams.val_angle_equidistant:
+            val_idxs = data.find_rmn_angles(c2ws=self.c2ws, angle_count=self.hparams.val_angle_count)
         else:
-            val_idxs = data.find_val_angles(c2ws=self.c2ws, angle_count=self.hparams.val_angle_count)
+            val_idxs = data.find_val_angles_eq(c2ws=self.c2ws, angle_count=self.hparams.val_angle_count)
         val_imgs = self.images[val_idxs]
         val_c2ws = self.c2ws[val_idxs]
         val_intrinsics = self.intrinsics[val_idxs]

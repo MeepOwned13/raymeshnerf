@@ -45,7 +45,7 @@ def create_nerf_data(images: Tensor, c2ws: Tensor, intrinsics: Tensor) -> tuple[
     return origins, directions, colors
 
 
-def find_val_angles(c2ws: torch.Tensor, angle_count: int = 12) -> torch.Tensor:
+def find_val_angles_eq(c2ws: torch.Tensor, angle_count: int = 12) -> torch.Tensor:
     """Deterministically get validation angle indicies from extrinsic camera matrices
 
     Takes angle_count many angles corresponding to equidistant points on the unit sphere, and finds closest cameras

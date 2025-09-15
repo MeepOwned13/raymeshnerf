@@ -9,9 +9,9 @@ if __name__ == '__main__':
         description="RayMeshNeRF Point Cloud to Mesh script, 'cloud' in filename swapped to 'mesh'"
     )
     parser.add_argument("pcd", help="Relative path to point cloud from project root directory, mesh saved to same dir")
-    parser.add_argument("-d", "--depth", type=int, default=9, help="Poisson Surface Reconstruction Depth")
-    parser.add_argument("-rq", "--remove_quantile", type=float, default=0.0,
-                        help="Quantile limit of density to remove vertices below after PSR")
+    parser.add_argument("-d", "--depth", type=int, default=8, help="Poisson Surface Reconstruction Depth")
+    parser.add_argument("-rq", "--remove_quantile", type=float, default=0.05,
+                        help="Quantile limit of density to remove vertices below after PSR, prevents phantom planes")
     parser.add_argument("-v", "--visualize", action="store_true", help="Visualize mesh?")
     parser.add_argument("-p", "--postfix", type=str, 
                         help="String to add after filename")
@@ -41,3 +41,4 @@ if __name__ == '__main__':
 
     mesh_path = (pcd_path / ".." / f"{pcd_path.name.replace("cloud", "mesh")}{f'_{args.postfix}' if args.postfix else ''}").resolve()
     o3d.io.write_triangle_mesh(mesh_path, mesh)
+    print(f"Mesh written to {mesh_path}")

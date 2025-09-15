@@ -38,7 +38,7 @@ if __name__ == '__main__':
     parser.add_argument('--postfix', type=str, default='')
     parser.add_argument('--scan', type=int, default=24)
     parser.add_argument('--mode', type=str, default='mesh', choices=['mesh', 'pcd'])
-    parser.add_argument('--vis_out_dir', type=str, default='')
+    parser.add_argument('--vis_out_dir', type=str, default='error_vis')
     parser.add_argument('--downsample_density', type=float, default=0.2)
     parser.add_argument('--patch_size', type=float, default=60)
     parser.add_argument('--max_dist', type=float, default=20)
@@ -163,5 +163,4 @@ if __name__ == '__main__':
     pbar.set_description('done')
     pbar.close()
     over_all = (mean_d2s + mean_s2d) / 2
-    print("Accuracy, Completeness, Overall")
-    print(mean_d2s, mean_s2d, over_all)
+    print(f"Accuracy: {mean_d2s:8.6f} | Completeness: {mean_s2d:8.6f} | Overall: {over_all:8.6f}")
