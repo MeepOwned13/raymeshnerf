@@ -43,6 +43,6 @@ if __name__ == '__main__':
     if args.visualize:
         o3d.visualization.draw_geometries([mesh])
 
-    mesh_path = (pcd_path / ".." / f"{pcd_path.name.replace("cloud", "mesh")}{f'_{args.postfix}' if args.postfix else ''}").resolve()
+    mesh_path = (pcd_path / ".." / f"{pcd_path.stem.replace("cloud", "mesh")}{f'_{args.postfix}' if args.postfix else ''}.ply").resolve()
     o3d.io.write_triangle_mesh(mesh_path, mesh)
     print(f"Mesh written to {mesh_path}")
