@@ -49,6 +49,8 @@ class NeRFData(L.LightningDataModule):
             val_idxs = data.find_rmn_angles(c2ws=self.c2ws, angle_count=self.hparams.val_angle_count)
         else:
             val_idxs = data.find_val_angles_eq(c2ws=self.c2ws, angle_count=self.hparams.val_angle_count)
+        else:
+            val_idxs = data.find_rmn_angles(c2ws=self.c2ws, angle_count=self.hparams.val_angle_count)
         val_imgs = self.images[val_idxs]
         val_c2ws = self.c2ws[val_idxs]
         val_intrinsics = self.intrinsics[val_idxs]
