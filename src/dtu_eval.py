@@ -35,9 +35,9 @@ if __name__ == '__main__':
     mp.freeze_support()
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--postfix', type=str, default='')
-    parser.add_argument('--scan', type=int, default=24)
-    parser.add_argument('--mode', type=str, default='mesh', choices=['mesh', 'pcd'])
+    parser.add_argument('-p', '--postfix', type=str, default='')
+    parser.add_argument('-s', '--scan', type=int, default=24)
+    parser.add_argument('-m', '--mode', type=str, default='mesh', choices=['mesh', 'pcd'])
     parser.add_argument('--vis_out_dir', type=str, default='error_vis')
     parser.add_argument('--downsample_density', type=float, default=0.2)
     parser.add_argument('--patch_size', type=float, default=60)
