@@ -46,8 +46,6 @@ class NeRFData(L.LightningDataModule):
 
         # Swapping between automatic choice of "equidistant angles" and pre-set indices
         if self.hparams.val_angle_equidistant:
-            val_idxs = data.find_rmn_angles(c2ws=self.c2ws, angle_count=self.hparams.val_angle_count)
-        else:
             val_idxs = data.find_val_angles_eq(c2ws=self.c2ws, angle_count=self.hparams.val_angle_count)
         else:
             val_idxs = data.find_rmn_angles(c2ws=self.c2ws, angle_count=self.hparams.val_angle_count)
