@@ -114,15 +114,19 @@ def create_rays(height: int, width: int, intrinsic: Tensor, c2w: Tensor) -> tupl
     return ray_origins.to(device), ray_directions.to(device)
 
 
-def sample_ray_uniformally(origins: Tensor, directions: Tensor, near: float, far: float,
+def sample_ray_uniformally(origins: Tensor, directions: Tensor, near_offset: float, far_offset: float,
                            num_samples: int, perturb=True) -> tuple[Tensor, Tensor, Tensor]:
     """Uniformally sample rays and return them in the World coordinate system
+
+    Near and far are defined as offsets, depth are gained by adding [near, far] to the distance from origins to (0,0,0),
+    the setup accomodates situations where scenes are contained within spheres/cubes where radius is easily defined. In
+    such cases near=-radius, far=radius.
 
     Args:
         origins (shape[N, 3]): Ray origins in World coordinates
         directions (shape[N, 3]): Cartesian ray directions in World
-        near: Near plane, the first sample points' depth
-        far: Far plane, the last sample points' depth
+        near_offset: Near plane offset from World origin, generally negative
+        far_offset: Far plane offset from World origin, generally positive
         num_samples: How many samples to take along the ray
         perturb: If True, adds noise to the depths
 
@@ -133,13 +137,14 @@ def sample_ray_uniformally(origins: Tensor, directions: Tensor, near: float, far
         - **depths**: *shape[N, num_samples]*: Depth of each sampled point on the given ray
     """
     device = origins.device
-    depths = torch.linspace(near, far, num_samples, dtype=torch.float32, device=device).expand(origins.shape[0], -1)
+    offsets = torch.linspace(near_offset, far_offset, num_samples, dtype=torch.float32, device=device).unsqueeze(0)
+    dist_to_zero = torch.sqrt(torch.sum(torch.pow(origins, 2), -1, keepdim=True))
+    depths = (dist_to_zero + offsets)
 
     if perturb:
         # Noise is at most half of step size, this ensures sorted depths, required for volume rendering
-        noise = (torch.rand(depths.shape, device=device) - 0.5) * (far - near) / num_samples / 2
-        # Clamping to stay between near and far
-        depths = (depths + noise).clamp(near, far)
+        noise = (torch.rand(depths.shape, device=device) - 0.5) * (far_offset - near_offset) / num_samples / 2
+        depths = (depths + noise)
 
     points = origins[..., None, :] + directions[..., None, :] * depths[..., :, None]
     # Expand directions to make NeRF input
@@ -256,13 +261,31 @@ def plot_ray_sampling(points: Tensor, origin: Tensor, cartesian_direction: Tenso
     plt.show()
 
 
-def render_rays(rgbs: Tensor, depths: Tensor, far: float) -> tuple[Tensor, Tensor, Tensor]:
+def depths_to_distance(origins: Tensor, depths: Tensor, far_offset: float):
+    """Get distances between sample points from depths and far_offset, uses World coordinates
+
+    Last distance is calculated from far plane (or 0 if point is beyond it)
+
+    Args:
+        origins (shape[N, 3]): Ray origins in World coordinates
+        depths (shape[N, M]): Specifies how far along the rays are the RGBSs
+        far_offset: Far plane offset from World origin, generally positive
+    """
+    dist_to_zero = torch.sqrt(torch.sum(torch.pow(origins, 2), -1, keepdim=True))
+    far_planes = (dist_to_zero + far_offset)
+    distances = depths[..., 1:] - depths[..., :-1]
+    distances = torch.cat([distances, F.relu(far_planes - depths[..., -1:])], -1)
+    return distances
+
+
+def render_rays(origins: Tensor, rgbs: Tensor, depths: Tensor, far_offset: float) -> tuple[Tensor, Tensor, Tensor]:
     """Performs Volumetric Rendering
 
     Args:
+        origins (shape[N, 3]): Ray origins in World coordinates
         rgbs (shape[N, M, 4]): RGB and Sigma values for sampled points
         depths (shape[N, M]): Specifies how far along the rays are the RGBSs
-        far: Specify far plane of rendering
+        far_offset: Far plane offset from World origin, generally positive
 
     Returns:
         tuple: a tuple containing (rgb, depth, acc) where
@@ -273,11 +296,7 @@ def render_rays(rgbs: Tensor, depths: Tensor, far: float) -> tuple[Tensor, Tenso
         - **weights**: *shape[N, M]*: Render weight per sample point
     """
     device = rgbs.device
-
-    distances = depths[..., 1:] - depths[..., :-1]
-    # Last distance is calculated from far plane (or 0 if point is beyond it)
-    distances = torch.cat([distances, F.relu(far - depths[..., -1:])], -1)
-    # directions already normalized at ray calculation, so distances correspond to world already
+    distances = depths_to_distance(origins, depths, far_offset)
 
     alpha = 1.0 - torch.exp(-F.relu(rgbs[..., 3]) * distances)
     weights = alpha * torch.cumprod(

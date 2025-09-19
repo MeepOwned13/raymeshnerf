@@ -14,7 +14,7 @@ class LInstantNGP(LU.LVolume):
     def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
                  min_res: int = 16, max_res: int = 2048, max_res_dense: int = 256, f_res: int = 128,
                  f_sigma_init: float = 5.0, f_sigma_threshold: float = 2.956033378, f_update_decay: float = 0.95,
-                 f_update_selection_rate: float = 0.5, dl_tv_loss_decay_end: int = 2**13,
+                 f_update_selection_rate: float = 0.5, dl_tv_loss_decay_end: int = 2**13 + 2**12,
                  distortion_loss_weight_start: float = 1e-4, distortion_loss_weight_end: float = 1e-2,
                  tv_loss_weight_start: float = 1e-6, tv_loss_weight_end: float = 1e-8, 
                  ray_tv_sample_count: int = 2 ** 8, ray_tv_loss_mult: float = 20.0, **kwargs):
@@ -68,43 +68,41 @@ class LInstantNGP(LU.LVolume):
 
         self.background_noise_range = [0.0, 1.0]
 
-    def render_rays(self, origins: Tensor, directions: Tensor, near: float | None = None,
-                    far: float | None = None, deterministic: bool = True,
+    def render_rays(self, origins: Tensor, directions: Tensor, deterministic: bool = True,
                     **kwargs) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        near = self.hparams.get("near", near) or self.trainer.datamodule.hparams.near
-        far = self.hparams.get("far", far) or self.trainer.datamodule.hparams.far
 
         points, expanded_directions, depths = U.rays.sample_ray_uniformally(
             origins=origins,
             directions=directions,
-            near=near,
-            far=far,
+            near_offset=self.near_offset,
+            far_offset=self.far_offset,
             num_samples=2**10,
             perturb=not deterministic,
         )
         rgbs = self.nerf(points, expanded_directions)
-        rgb, depth, acc, _, _ = U.rays.render_rays(rgbs=rgbs, depths=depths, far=far)
+        rgb, depth, acc, _, _ = U.rays.render_rays(
+            origins=origins, rgbs=rgbs, depths=depths, far_offset=self.far_offset
+        )
         return rgb, depth, acc
     
     def calculate_loss(self, origins, directions, colors):
-        near = self.hparams.get("near", self.trainer.datamodule.hparams.near)
-        far = self.hparams.get("far", self.trainer.datamodule.hparams.far)
         batch_size = origins.shape[0]
 
         points, expanded_directions, depths = U.rays.sample_ray_uniformally(
             origins=origins,
             directions=directions,
-            near=near,
-            far=far,
+            near_offset=self.near_offset,
+            far_offset=self.far_offset,
             num_samples=2**10,
             perturb=True,
         )
         p_rgbs = self.nerf(points, expanded_directions)
-        p_rgb, _, p_alpha, _, p_weights = U.rays.render_rays(rgbs=p_rgbs, depths=depths, far=far)
+        p_rgb, _, p_alpha, _, p_weights = U.rays.render_rays(
+            origins=origins, rgbs=p_rgbs, depths=depths, far_offset=self.far_offset
+        )
 
         # Distortion loss
-        distances = depths[..., 1:] - depths[..., :-1]
-        distances = torch.cat([distances, torch.nn.functional.relu(far - depths[..., -1:])], -1)
+        distances = U.rays.depths_to_distance(origins=origins, depths=depths, far_offset=self.far_offset)
         distloss = eff_distloss(p_weights, depths, distances)
 
         # Background noise, skews towards 0 alpha in GT 0 alpha for RGBA, skews towards 1 alpha in RGB scenarios
@@ -216,7 +214,7 @@ if __name__ == '__main__':
             ModelCheckpoint(filename="best_val_psnr_{epoch}", monitor="val_psnr", mode="max", every_n_epochs=1,
                             save_weights_only=True),
             ModelCheckpoint(filename="end_{epoch}", save_on_train_epoch_end=True, every_n_epochs=1),
-            EarlyStopping(monitor="val_psnr", mode="max", patience=4, min_delta=0.0)
+            EarlyStopping(monitor="val_psnr", mode="max", patience=3, min_delta=0.0),
         ],
         num_sanity_val_steps=0,  # Here to reduce experiment time, make sure to set it to -1 or >0 for new data(sets)
     )

@@ -126,20 +126,19 @@ if __name__ == '__main__':
             "rm_depth": rm_depth,
             "sp_mask": sp_mask,
         }, raw_path)
-    rm_depth_mask = ((rm_depth > model.hparams.near) & (rm_depth <= model.hparams.far)).squeeze(-1)
-    rm_points = origin[rm_depth_mask] + rm_depth[rm_depth_mask] * direction[rm_depth_mask]
 
-    print(f"Points within depth limits: {rm_points.shape[0]:_d}"
-          f", of which {rm_points[sp_mask[rm_depth_mask]].shape[0]:_d} are Surface Points")
-    
+    rm_points = origin + rm_depth * direction
     bbox_mask = (rm_points.abs() <= 1.0).all(-1)
-    point_cloud = cloud_from_tensor(rm_points[bbox_mask])
-    print(f"After filtering bounding box [-1,1] outliers: {point_cloud}")
+    rm_points = rm_points[bbox_mask]
+    print(f"Points within [-1, 1] bbox limits: {rm_points.shape[0]:_d}"
+          f", of which {rm_points[sp_mask[bbox_mask]].shape[0]:_d} are Surface Points")
 
+    point_cloud = cloud_from_tensor(rm_points[bbox_mask])
     cloud_path = datadir / f"rmn_cloud_raw{f'_{args.postfix}' if args.postfix else ""}.ply"
     o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
     print(f"Raw Point cloud written to {cloud_path}")
 
+    """
     with torch.no_grad():
         sigmas = []
         sigma_points = DataLoader(
@@ -154,6 +153,7 @@ if __name__ == '__main__':
     mask = sigmas < np.quantile(sigmas, 0.75)
     point_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(point_cloud.points)[mask]))
     print(f"After filtering sigma < 0.75 quantile: {point_cloud}")
+    """
 
     print(f"Calculating normal vectors...")
     normals = []

@@ -40,9 +40,6 @@ class NeRFData(L.LightningDataModule):
 
     def setup(self, stage: str):
         self.images, self.c2ws, self.intrinsics = self.load_from_file()
-        if self.hparams.get("near", None) is None or self.hparams.get("far", None) is None:
-            self.hparams.near, self.hparams.far = data.compute_near_far_planes(c2ws=self.c2ws)
-            self.save_hyperparameters()
 
         # Swapping between automatic choice of "equidistant angles" and pre-set indices
         if self.hparams.val_angle_equidistant:
@@ -100,6 +97,10 @@ class LVolume(L.LightningModule):
         self.nerf: torch.nn.Module = None
 
         self.background_noise_range = [0.4, 0.6]
+        self.near_offset = -1.7320507764816284
+        """Near offset, defaulted to scenes being contained in [-1, 1] bbox => radius sqrt(3) sphere"""
+        self.far_offset = 1.7320507764816284
+        """Far offset, defaulted to scenes being contained in [-1, 1] bbox => radius sqrt(3) sphere"""
 
     def setup(self, stage):
         if self.nerf is None:
@@ -107,14 +108,12 @@ class LVolume(L.LightningModule):
         if stage == "fit":
             self.lossf = MSELoss()
     
-    def render_rays(self, origins: Tensor, directions: Tensor, near: float | None = None, far: float | None = None):
+    def render_rays(self, origins: Tensor, directions: Tensor):
         """Render rays ready for display (e.g. don't return separate coarse, fine colors)
 
         Args:
             origins (shape[N, 3]): Ray origins in World coordinates
             directions (shape[N, 3]): Cartesian ray directions in World
-            near: Near plane, the first sample points' depth
-            far: Far plane, the last sample points' depth
 
         Returns:
             tuple: a tuple containing (rgb, depth, acc) where
@@ -138,8 +137,8 @@ class LVolume(L.LightningModule):
         raise NotImplementedError(f"{self.__class__} hasn't implemented render_rays yet")
 
     @torch.no_grad()
-    def render_image(self, height: int, width: int, c2w: Tensor, intrinsic: Tensor, near: float | None = None,
-                     far: float | None = None, batch_size: int | None = None) -> Tensor:
+    def render_image(self, height: int, width: int, c2w: Tensor, intrinsic: Tensor,
+                     batch_size: int | None = None) -> Tensor:
         """Renders an image using NeRF and Volume Rendering
 
         Args:
@@ -147,15 +146,11 @@ class LVolume(L.LightningModule):
             width: Image width
             c2w (shape[4, 4]): Extrinsic camera matrix (Camera to World)
             intrinsic (shape[3, 3]): Intrinsic camera matrix
-            near: Near plane, the first sample points' depth, if None uses hparams
-            far: Far plane, the last sample points' depth, if None uses hparams
             batch_size: Batch size for rendering, if None uses hparams
 
         Returns:
             image (shape[height, width, 3]): Rendered image
         """
-        near = self.hparams.get("near", near) or self.trainer.datamodule.hparams.near
-        far = self.hparams.get("far", far) or self.trainer.datamodule.hparams.far
         batch_size = self.hparams.get("batch_size", batch_size) or self.trainer.datamodule.hparams.batch_size
 
         origins, directions = rays.create_rays(
@@ -172,8 +167,6 @@ class LVolume(L.LightningModule):
             rgb, _, alpha = self.render_rays(
                 origins=o,
                 directions=d,
-                near=near,
-                far=far,
             )
             image.append(torch.cat((rgb, alpha), dim=-1))
 
@@ -215,10 +208,13 @@ class LVolume(L.LightningModule):
                 stacklevel=2  # Shows the caller's line in the warning
             )
 
-        depth = torch.full(shape + (1,), self.hparams.near, dtype=torch.float32, device=self.device)
+        origins, directions = origins.to(self.device), directions.to(self.device)
+
+        dist_to_zero = torch.sqrt(torch.sum(torch.pow(origins, 2), -1, keepdim=True))
+        depth, far_plane = (dist_to_zero + self.near_offset), (dist_to_zero + self.far_offset)
+        
         in_progress_mask = torch.ones(shape, dtype=torch.bool, device=self.device)
         sigma_limit = torch.log(torch.tensor(sigma_limit)).item()
-        origins, directions = origins.to(self.device), directions.to(self.device)
 
         with torch.no_grad():
             iters = 0
@@ -253,7 +249,7 @@ class LVolume(L.LightningModule):
                 # - gradient falls below limit (and this step used the gradient!), surface point depth estimate is found
                 # - depth goes beyond the far plane
                 mask_update = ((step_size.abs() >= min_step_size) | ~grad_step).squeeze(-1) &\
-                            (masked_depth < self.hparams.far).squeeze(-1)
+                            (masked_depth < far_plane[in_progress_mask]).squeeze(-1)
                 # - already stopped at a previous step (ensured by re-indexing mask)
                 in_progress_mask[in_progress_mask.clone()] = mask_update
                 if (~in_progress_mask).all():
