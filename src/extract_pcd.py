@@ -133,7 +133,7 @@ if __name__ == '__main__':
     print(f"Points within [-1, 1] bbox limits: {rm_points.shape[0]:_d}"
           f", of which {rm_points[sp_mask[bbox_mask]].shape[0]:_d} are Surface Points")
 
-    point_cloud = cloud_from_tensor(rm_points[bbox_mask])
+    point_cloud = cloud_from_tensor(rm_points)
     cloud_path = datadir / f"rmn_cloud_raw{f'_{args.postfix}' if args.postfix else ""}.ply"
     o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
     print(f"Raw Point cloud written to {cloud_path}")
