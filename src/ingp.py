@@ -17,7 +17,8 @@ class LInstantNGP(LU.LVolume):
                  f_update_selection_rate: float = 0.5, dl_tv_loss_decay_end: int = 2**13 + 2**12,
                  distortion_loss_weight_start: float = 1e-4, distortion_loss_weight_end: float = 1e-2,
                  tv_loss_weight_start: float = 1e-6, tv_loss_weight_end: float = 1e-8, 
-                 ray_tv_sample_count: int = 2 ** 8, ray_tv_loss_mult: float = 20.0, **kwargs):
+                 ray_tv_sample_count: int = 2 ** 8, ray_tv_loss_mult: float = 20.0,
+                 depth_loss_weight: float = 1e-4, **kwargs):
         """Init
 
         Default f_sigma_threshold is chosen based on https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf,
@@ -48,7 +49,9 @@ class LInstantNGP(LU.LVolume):
         """
         super().__init__()
         if (ray_tv_sample_count > 2 ** 10 and ray_tv_sample_count % 2 == 0) or ray_tv_sample_count < 0:
-            raise ValueError("ray_tv_sample_count must be divisible by 2 and remain between 0 and 1024 (total samples per ray)")
+            raise ValueError(
+                "ray_tv_sample_count must be divisible by 2 and remain between 0 and 1024 (total samples per ray)"
+            )
 
         self.save_hyperparameters()
         self.nerf: U.nn.InstantNGP = U.nn.InstantNGP(
@@ -85,7 +88,7 @@ class LInstantNGP(LU.LVolume):
         )
         return rgb, depth, acc
     
-    def calculate_loss(self, origins, directions, colors):
+    def calculate_loss(self, origins, directions, colors, sfm_depths, sfm_errors):
         batch_size = origins.shape[0]
 
         points, expanded_directions, depths = U.rays.sample_ray_uniformally(
@@ -101,10 +104,6 @@ class LInstantNGP(LU.LVolume):
             origins=origins, rgbs=p_rgbs, depths=depths, far_offset=self.far_offset
         )
 
-        # Distortion loss
-        distances = U.rays.depths_to_distance(origins=origins, depths=depths, far_offset=self.far_offset)
-        distloss = eff_distloss(p_weights, depths, distances)
-
         # Background noise, skews towards 0 alpha in GT 0 alpha for RGBA, skews towards 1 alpha in RGB scenarios
         noise = torch.empty_like(p_rgb).uniform_(self.background_noise_range[0], self.background_noise_range[1])
         mixed_pred_colors = p_rgb * p_alpha + noise * (1 - p_alpha)
@@ -116,11 +115,25 @@ class LInstantNGP(LU.LVolume):
         else:  # RGB
             loss = self.lossf(mixed_pred_colors, colors)
 
+        distances = U.rays.depths_to_distance(origins=origins, depths=depths, far_offset=self.far_offset)
+        # Depth supervision loss https://www.cs.cmu.edu/~dsnerf/
+        dsm = (sfm_errors != torch.inf).squeeze(-1)  # depth supervision mask
+        depth_loss =\
+            torch.mean(
+                -torch.sum(
+                    torch.log(p_weights[dsm] + torch.finfo(p_weights.dtype).eps) *\
+                    torch.exp(-torch.pow(depths[dsm] - sfm_depths[dsm], 2) / (2 * torch.pow(sfm_errors[dsm], 2))) *\
+                    distances[dsm],
+                -1)
+            )
+        loss += depth_loss * self.hparams.depth_loss_weight
+
         # Distortion loss
-        ds_loss_weight = self.hparams.distortion_loss_weight_start -\
+        dist_loss = eff_distloss(p_weights, depths, distances)
+        dist_loss_weight = self.hparams.distortion_loss_weight_start -\
             min(1.0, self.trainer.global_step / self.hparams.dl_tv_loss_decay_end) *\
             (self.hparams.distortion_loss_weight_start - self.hparams.distortion_loss_weight_end)
-        loss += distloss * ds_loss_weight
+        loss += dist_loss * dist_loss_weight
 
         if self.trainer.global_step <= self.hparams.dl_tv_loss_decay_end:
             tv_loss_weight = self.hparams.tv_loss_weight_start -\
@@ -174,7 +187,7 @@ class LInstantNGP(LU.LVolume):
             {"params": self.nerf.feature_mlp.parameters(), "weight_decay": 10**-6, "eps": 1e-15}
         ], lr=1e-2, betas=(0.9, 0.99))
 
-        # As per the paper of INGP
+        # As per https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf
         initial_steps = 20_000
         decay_steps = 10_000
         decay_factor = 0.33
@@ -202,8 +215,8 @@ if __name__ == '__main__':
 
     data = LU.NeRFData("scan97", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_count=2,
                        val_angle_equidistant=False, keep_val_in_train=True)
-    module = LInstantNGP()
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}_m_retr")
+    module = LInstantNGP(ray_tv_sample_count=0)
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}_m_ds")
 
     trainer = L.Trainer(
         max_epochs=20, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,

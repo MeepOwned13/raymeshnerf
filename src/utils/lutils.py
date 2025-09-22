@@ -11,7 +11,7 @@ import warnings
 import re
 from random import random
 
-from . import data, rays
+from . import data, rays, colmap
 
 
 class NeRFData(L.LightningDataModule):
@@ -56,10 +56,16 @@ class NeRFData(L.LightningDataModule):
         train_intrinsics = self.intrinsics[train_idxs]
 
         if stage == "fit":
+            origins, directions, colors = data.create_nerf_data(train_imgs, train_c2ws, train_intrinsics)
+
+            depths, errors = colmap.get_sparse_sfm_depths(train_imgs, train_c2ws, train_intrinsics)
+            depths, errors = depths.flatten(0, -2), errors.flatten(0, -2)
+            self.ds_mask = (errors != torch.inf).squeeze(-1)
+            
             self.train_rays: TensorDataset = TensorDataset(
-                *data.create_nerf_data(train_imgs, train_c2ws, train_intrinsics)
+                origins, directions, colors, depths, errors
             )
-            """Dataset: (origins, directions, colors)"""
+            """Dataset: (origins, directions, colors, depths, errors)"""
 
             self.val_angles: TensorDataset = TensorDataset(
                 val_c2ws,
@@ -71,8 +77,7 @@ class NeRFData(L.LightningDataModule):
     def train_dataloader(self):
         return DataLoader(
             dataset=self.train_rays,
-            batch_size=self.hparams.batch_size,
-            shuffle=True,
+            batch_sampler=data.DSNeRFBatchSampler(self.ds_mask, batch_size=self.hparams.batch_size),
             num_workers=6,
             prefetch_factor=4,
             persistent_workers=True,
@@ -108,7 +113,7 @@ class LVolume(L.LightningModule):
         if stage == "fit":
             self.lossf = MSELoss()
     
-    def render_rays(self, origins: Tensor, directions: Tensor):
+    def render_rays(self, origins: Tensor, directions: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Render rays ready for display (e.g. don't return separate coarse, fine colors)
 
         Args:
@@ -123,13 +128,16 @@ class LVolume(L.LightningModule):
         """
         raise NotImplementedError(f"{self.__class__} hasn't implemented render_rays yet")
     
-    def calculate_loss(self, origins, directions, colors):
+    def calculate_loss(self, origins: Tensor, directions: Tensor, colors: Tensor, sfm_depths: Tensor, sfm_errors: Tensor
+                       ) -> Tensor:
         """Calculate loss for rays
 
         Args:
             origins (shape[N, 3]): Ray origins in World coordinates
             directions (shape[N, 3]): Cartesian ray directions in World
             colors (shape[N, 3]): Target pixel colors
+            sfm_depths (shape[N]): SFM depth estimates (-1 where no estimates)
+            sfm_errors (shape[N]): SFM depth errors (torch.inf where no estimates)
 
         Return:
             loss (shape[]): Loss
@@ -294,8 +302,8 @@ class LVolume(L.LightningModule):
         return normals
 
     def training_step(self, batch, batch_idx):
-        origins, directions, colors = batch
-        loss = self.calculate_loss(origins, directions, colors)
+        origins, directions, colors, depths, errors = batch
+        loss = self.calculate_loss(origins, directions, colors, depths, errors)
         self.log("train_loss", loss, prog_bar=True, on_step=True)
         return loss
 

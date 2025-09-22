@@ -3,12 +3,15 @@ import numpy as np
 from pathlib import Path
 import argparse
 
+"""
 for variant in (['cuda_ad_rgb', 'llvm_ad_rgb', 'scalar_rgb']):
     try:
         mi.set_variant(variant)
         break
     except ImportError:
         pass
+"""
+mi.set_variant('scalar_rgb')
 from mitsuba import ScalarTransform4f as ST
 
 

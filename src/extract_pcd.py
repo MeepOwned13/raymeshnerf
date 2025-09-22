@@ -55,6 +55,7 @@ def load_model_and_data(log_path):
     chkpts = list((log_path / "checkpoints").glob("*best_val*"))
     chkpts.sort(key=lambda p: int(re.match(r".*epoch=(\d*).*", p.name, flags=re.DOTALL).group(1)))
     chkpt_path = chkpts[-1]
+    print(f"Using checkpoint: {chkpt_path}")
 
     model = LInstantNGP.load_from_checkpoint(
         chkpt_path, map_location=COMPUTE_DEVICE, hparams_file=hparams_path
@@ -66,7 +67,7 @@ def load_model_and_data(log_path):
         chkpt_path, map_location=torch.device('cpu'), hparams_file=hparams_path
     )
     data._set_hparams(model.hparams)
-    data.setup("fit")
+    data.setup("predict")
 
     return model, data
 

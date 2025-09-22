@@ -281,3 +281,40 @@ def load_data(name: str, source: ObjectSource = ObjectSource.GSO, directory: str
             raise ValueError(f"Unknown ObjectSource: {source}")
 
     return data
+
+
+class DSNeRFBatchSampler(torch.utils.data.Sampler):
+    def __init__(self, ds_mask: torch.Tensor, ds_ratio: float = 0.01, batch_size: int = 512):
+        """Init
+        
+        BatchSampler where in every batch (batch_size * ds_ratio) samples are ones specified in ds_mask, used for pixels
+        which have SFM depth estimates. The rest are regularly sampled not including ds_masked ones. SFM depth ones are
+        drawn randomly instead of non-repeating for the length of the sampler (the assumption is that (N * ds_ratio) >>
+        ds_mask.sum()).
+
+        Args:
+            ds_mask (shape[N]): Depth Supervision mask, True where SFM depth is specified
+            ds_ratio: Ratio of the batch to draw SFM depth specified indices, count rounded from (batch_size*ds_ratio)
+            batch_size: Batch size (includes DS and non-DS samples)
+        """
+        super(DSNeRFBatchSampler, self).__init__()
+        if ds_mask.ndim > 1:
+            raise ValueError("ds_mask should be 1D")
+
+        self.reg_indices = torch.argwhere(~ds_mask).squeeze(-1)
+        self.ds_indices = torch.argwhere(ds_mask).squeeze(-1)
+        self.batch_size = batch_size
+
+        self.ds_batch_size = round(self.batch_size * ds_ratio)
+        self.reg_batch_size = self.batch_size - self.ds_batch_size
+
+    def __iter__(self):
+        reg_indices = self.reg_indices[torch.randperm(len(self.reg_indices))]
+
+        for i in range(len(self)):
+            batch = reg_indices[i * self.reg_batch_size:(i + 1) * self.reg_batch_size].tolist()
+            batch += self.ds_indices[torch.multinomial(torch.ones((len(self.ds_indices))), self.ds_batch_size)].tolist()
+            yield batch
+
+    def __len__(self):
+        return (self.reg_indices.shape[0] // self.reg_batch_size + 1) * self.batch_size

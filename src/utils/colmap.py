@@ -107,7 +107,7 @@ def get_sparse_colmap_reconstruction(directory: Path, images: torch.Tensor, extr
             img = db.read_image(list(stuff.data_ids)[0].id)
             img = pc_img_to_torch_num(img)
             # Colmap uses y down, z forward, also needs w2c instead of c2w
-            c2w = extrinsics[img].numpy()
+            c2w = extrinsics[img].clone().numpy()
             c2w[:, 1] *= -1
             c2w[:, 2] *= -1
             w2c = np.linalg.inv(c2w)[:3, :4]
@@ -154,7 +154,7 @@ def get_sparse_depths_from_colmap_reconstruction(rec: pc.Reconstruction, images:
                 continue
 
             p3 = rec.points3D[p2.point3D_id]
-            if np.any(np.abs(p3.xyz) > 1.0):  # out of observed bbox
+            if np.any(np.abs(p3.xyz) > 1.0) or (p3.error > 2.0):  # out of observed bbox or large reprojection error
                 continue
 
             x, y = torch.tensor(p2.xy).round().to(torch.int32) - 1
@@ -165,4 +165,4 @@ def get_sparse_depths_from_colmap_reconstruction(rec: pc.Reconstruction, images:
                 errors[torch_img_num, y, x] = p3.error
                 depths[torch_img_num, y, x] = dist
 
-    return depths, errors
+    return depths.unsqueeze(-1), errors.unsqueeze(-1)
