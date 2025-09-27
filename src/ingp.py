@@ -14,11 +14,11 @@ class LInstantNGP(LU.LVolume):
     def __init__(self, hidden_size: int = 64, encoding_log2: int = 19, embed_dims: int = 2, levels: int = 16,
                  min_res: int = 16, max_res: int = 2048, max_res_dense: int = 256, f_res: int = 128,
                  f_sigma_init: float = 5.0, f_sigma_threshold: float = 2.956033378, f_update_decay: float = 0.95,
-                 f_update_selection_rate: float = 0.5, dl_tv_loss_decay_end: int = 2**13 + 2**12,
+                 f_update_selection_rate: float = 0.5, dl_tv_loss_decay_end: int = 3 * 2**12,
                  distortion_loss_weight_start: float = 1e-4, distortion_loss_weight_end: float = 1e-2,
                  tv_loss_weight_start: float = 1e-6, tv_loss_weight_end: float = 1e-8, 
                  ray_tv_sample_count: int = 2 ** 8, ray_tv_loss_mult: float = 20.0,
-                 depth_loss_weight: float = 1e-4, **kwargs):
+                 depth_loss_weight: float = 1e-2, **kwargs):
         """Init
 
         Default f_sigma_threshold is chosen based on https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf,
@@ -116,13 +116,17 @@ class LInstantNGP(LU.LVolume):
             loss = self.lossf(mixed_pred_colors, colors)
 
         distances = U.rays.depths_to_distance(origins=origins, depths=depths, far_offset=self.far_offset)
+        eps = torch.finfo(p_weights.dtype).eps
         # Depth supervision loss https://www.cs.cmu.edu/~dsnerf/
+        # Weights in this implementation are already multiplied by distances => redividing by distances for first term
         dsm = (sfm_errors != torch.inf).squeeze(-1)  # depth supervision mask
+        # Scaling errors by step size (sharper distribution => sharper surface)
+        scaled_errros = sfm_errors[dsm] * ((self.far_offset - self.near_offset) / 1024)
         depth_loss =\
             torch.mean(
                 -torch.sum(
-                    torch.log(p_weights[dsm] + torch.finfo(p_weights.dtype).eps) *\
-                    torch.exp(-torch.pow(depths[dsm] - sfm_depths[dsm], 2) / (2 * torch.pow(sfm_errors[dsm], 2))) *\
+                    torch.log(p_weights[dsm] / (distances[dsm] + eps) + eps) *\
+                    torch.exp(-torch.pow(depths[dsm] - sfm_depths[dsm], 2) / (2 * torch.pow(scaled_errros, 2))) *\
                     distances[dsm],
                 -1)
             )
@@ -213,9 +217,9 @@ if __name__ == '__main__':
         torch.set_float32_matmul_precision('medium')
     L.seed_everything(42, workers=True)
 
-    data = LU.NeRFData("scan97", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_count=2,
+    data = LU.NeRFData("scan110", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_count=2, 
                        val_angle_equidistant=False, keep_val_in_train=True)
-    module = LInstantNGP(ray_tv_sample_count=0)
+    module = LInstantNGP()
     logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}_m_ds")
 
     trainer = L.Trainer(

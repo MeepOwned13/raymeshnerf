@@ -81,8 +81,6 @@ if __name__ == '__main__':
     parser.add_argument("log_name", help="Name of directory containing model under lightning_logs")
     parser.add_argument("-v", "--visualize", action="store_true", help="Visualize final point cloud?")
     parser.add_argument("-p", "--postfix", type=str, help="String to add after filename")
-    parser.add_argument("-r", "--save_raw", action="store_true",
-                        help="Save raw outputs (origin, direction, depth, sp_mask)")    
     args = parser.parse_args()
 
     proj_dir = Path(f"{__file__}/../../").resolve()
@@ -95,8 +93,9 @@ if __name__ == '__main__':
 
     idxs = U.data.find_rmn_angles(data.c2ws, angle_count=8)
     origin, direction = get_origin_direction_c2w_intrinsic((1200, 1600), data.c2ws[idxs], data.intrinsics[idxs])
-    shape = origin.shape[:-1]
-    dl = DataLoader(TensorDataset(origin.flatten(0, -2), direction.flatten(0, -2)), batch_size=2**19)
+    alpha_mask = data.images[idxs, ..., -1] != 0
+    origin, direction = origin[alpha_mask], direction[alpha_mask]
+    dl = DataLoader(TensorDataset(origin, direction), batch_size=2**19)
 
     print(f"Running RayMeshNeRF Surface Point extraction for {dl.dataset.tensors[0].shape[0]:_d} rays")
     rm_depth, sp_mask = [], []
@@ -114,25 +113,13 @@ if __name__ == '__main__':
             torch.cuda.empty_cache()
         rm_depth.append(d)
         sp_mask.append(sm)
-
-    #temp = torch.load(datadir / "rmn_raw.pt")
-    #origin, direction, rm_depth, sp_mask = temp["origin"], temp["direction"], temp["rm_depth"], temp["sp_mask"]
-
-    rm_depth, sp_mask = torch.cat(rm_depth, 0).reshape(shape + (1,)), torch.cat(sp_mask, 0).reshape(shape)
-    if args.save_raw:
-        raw_path = datadir / f"rmn_raw{f'_{args.postfix}' if args.postfix else ""}.pt"
-        torch.save({
-            "origin": origin,
-            "direction": direction,
-            "rm_depth": rm_depth,
-            "sp_mask": sp_mask,
-        }, raw_path)
+    rm_depth, sp_mask = torch.cat(rm_depth, 0), torch.cat(sp_mask, 0)
 
     rm_points = origin + rm_depth * direction
     bbox_mask = (rm_points.abs() <= 1.0).all(-1)
-    rm_points = rm_points[bbox_mask]
+    rm_points, sp_mask = rm_points[bbox_mask], sp_mask[bbox_mask]
     print(f"Points within [-1, 1] bbox limits: {rm_points.shape[0]:_d}"
-          f", of which {rm_points[sp_mask[bbox_mask]].shape[0]:_d} are Surface Points")
+          f", of which {rm_points[sp_mask].shape[0]:_d} are Surface Points")
 
     point_cloud = cloud_from_tensor(rm_points)
     cloud_path = datadir / f"rmn_cloud_raw{f'_{args.postfix}' if args.postfix else ""}.ply"

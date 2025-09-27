@@ -283,37 +283,50 @@ def load_data(name: str, source: ObjectSource = ObjectSource.GSO, directory: str
     return data
 
 
-class DSNeRFBatchSampler(torch.utils.data.Sampler):
-    def __init__(self, ds_mask: torch.Tensor, ds_ratio: float = 0.01, batch_size: int = 512):
+class DSNeRFAlphaBatchSampler(torch.utils.data.Sampler):
+    def __init__(self, ds_mask: torch.Tensor, alpha_mask: torch.Tensor | None = None,
+                 ds_ratio: float = 0.01, alpha_ratio: float = 0.10, batch_size: int = 512):
         """Init
-        
-        BatchSampler where in every batch (batch_size * ds_ratio) samples are ones specified in ds_mask, used for pixels
-        which have SFM depth estimates. The rest are regularly sampled not including ds_masked ones. SFM depth ones are
-        drawn randomly instead of non-repeating for the length of the sampler (the assumption is that (N * ds_ratio) >>
-        ds_mask.sum()).
+
+        BatchSampler in which indices are split to 3 categories: (1.) ds_mask=False, alpha_mask=True (2.) ds_mask=False
+        alpha_mask=False (3.) ds_mask=True. These are sampled in accoredance to the ratios: 1 - (alpha_ratio + ds_ratio)
+        (2.) alpha_ratio (3.) ds_ratio. Regular indices (1.) are the ones deciding dataloader length, the rest use
+        randint to sample the indices. As such, the only guarantee is every index from (1.) to be covered.
 
         Args:
             ds_mask (shape[N]): Depth Supervision mask, True where SFM depth is specified
             ds_ratio: Ratio of the batch to draw SFM depth specified indices, count rounded from (batch_size*ds_ratio)
             batch_size: Batch size (includes DS and non-DS samples)
         """
-        super(DSNeRFBatchSampler, self).__init__()
+        super(DSNeRFAlphaBatchSampler, self).__init__()
         if ds_mask.ndim > 1:
             raise ValueError("ds_mask should be 1D")
+        
+        self.has_alpha = alpha_mask is not None
+        if not self.has_alpha:
+            alpha_mask = torch.full_like(ds_mask, True)
 
-        self.reg_indices = torch.argwhere(~ds_mask).squeeze(-1)
+        self.reg_indices = torch.argwhere((~ds_mask) & alpha_mask).squeeze(-1)
+        self.alpha_indices = torch.argwhere((~ds_mask) & (~alpha_mask)).squeeze(-1)
         self.ds_indices = torch.argwhere(ds_mask).squeeze(-1)
         self.batch_size = batch_size
 
         self.ds_batch_size = round(self.batch_size * ds_ratio)
-        self.reg_batch_size = self.batch_size - self.ds_batch_size
+        self.alpha_batch_size = round(self.batch_size * alpha_ratio) if self.has_alpha else 0
+        self.reg_batch_size = self.batch_size - self.ds_batch_size - self.alpha_batch_size
 
     def __iter__(self):
         reg_indices = self.reg_indices[torch.randperm(len(self.reg_indices))]
 
         for i in range(len(self)):
             batch = reg_indices[i * self.reg_batch_size:(i + 1) * self.reg_batch_size].tolist()
-            batch += self.ds_indices[torch.multinomial(torch.ones((len(self.ds_indices))), self.ds_batch_size)].tolist()
+            batch += self.ds_indices[
+                torch.randint(0, self.ds_indices.shape[0], (self.ds_batch_size,))
+            ].tolist()
+            if self.has_alpha:
+                batch += self.alpha_indices[
+                    torch.randint(0, self.alpha_indices.shape[0], (self.alpha_batch_size,))
+                ].tolist()
             yield batch
 
     def __len__(self):

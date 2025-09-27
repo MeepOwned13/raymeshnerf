@@ -16,7 +16,7 @@ from . import data, rays, colmap
 
 class NeRFData(L.LightningDataModule):
     def __init__(self, name: str, source: data.ObjectSource, batch_size: int = 1024, val_angle_count: int | None = None,
-                 val_angle_equidistant: bool = False, keep_val_in_train: bool = False):
+                 val_angle_equidistant: bool = False, keep_val_in_train: bool = False, use_alpha_mask: bool = True):
         """Init
 
         Args:
@@ -25,6 +25,7 @@ class NeRFData(L.LightningDataModule):
             val_angle_count: How many equidistant validation angles to choose
             val_angle_equidistant: Use equidistant val angles, or farthest point sampled ones (better for non 360)
             keep_val_in_train: Don't remove validation images from training set (useful for monitoring train images)
+            use_alpha_mask: Sample low alpha areas at a 10% rate
         """
         super().__init__()
         self.save_hyperparameters()
@@ -57,6 +58,12 @@ class NeRFData(L.LightningDataModule):
 
         if stage == "fit":
             origins, directions, colors = data.create_nerf_data(train_imgs, train_c2ws, train_intrinsics)
+            # Alpha mask covers around the object (5 pixels) and the object itself
+            if train_imgs.shape[-1] == 4 and self.hparams.use_alpha_mask:
+                self.alpha_mask = train_imgs[..., -1].unsqueeze(1)
+                self.alpha_mask = torch.nn.functional.max_pool2d(self.alpha_mask, 9, 1, 4).flatten() != 0.0
+            else:
+                self.alpha_mask = None
 
             depths, errors = colmap.get_sparse_sfm_depths(train_imgs, train_c2ws, train_intrinsics)
             depths, errors = depths.flatten(0, -2), errors.flatten(0, -2)
@@ -77,7 +84,7 @@ class NeRFData(L.LightningDataModule):
     def train_dataloader(self):
         return DataLoader(
             dataset=self.train_rays,
-            batch_sampler=data.DSNeRFBatchSampler(self.ds_mask, batch_size=self.hparams.batch_size),
+            batch_sampler=data.DSNeRFAlphaBatchSampler(self.ds_mask, self.alpha_mask, batch_size=self.hparams.batch_size),
             num_workers=6,
             prefetch_factor=4,
             persistent_workers=True,
