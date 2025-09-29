@@ -285,7 +285,7 @@ def load_data(name: str, source: ObjectSource = ObjectSource.GSO, directory: str
 
 class DSNeRFAlphaBatchSampler(torch.utils.data.Sampler):
     def __init__(self, ds_mask: torch.Tensor, alpha_mask: torch.Tensor | None = None,
-                 ds_ratio: float = 0.01, alpha_ratio: float = 0.10, batch_size: int = 512):
+                 ds_ratio: float = 0.01, alpha_ratio: float = 0.19, batch_size: int = 512):
         """Init
 
         BatchSampler in which indices are split to 3 categories: (1.) ds_mask=False, alpha_mask=True (2.) ds_mask=False

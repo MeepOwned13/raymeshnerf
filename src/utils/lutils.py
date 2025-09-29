@@ -25,7 +25,7 @@ class NeRFData(L.LightningDataModule):
             val_angle_count: How many equidistant validation angles to choose
             val_angle_equidistant: Use equidistant val angles, or farthest point sampled ones (better for non 360)
             keep_val_in_train: Don't remove validation images from training set (useful for monitoring train images)
-            use_alpha_mask: Sample low alpha areas at a 10% rate
+            use_alpha_mask: Sample low alpha areas at a 19% rate
         """
         super().__init__()
         self.save_hyperparameters()

@@ -4,6 +4,7 @@ from torch import Tensor
 import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
+import argparse
 
 import utils as U
 import utils.lutils as LU
@@ -213,17 +214,21 @@ class LInstantNGP(LU.LVolume):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-s', '--scan', type=int, required=True)
+    args = parser.parse_args()
+
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('medium')
     L.seed_everything(42, workers=True)
 
-    data = LU.NeRFData("scan110", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_count=2, 
+    data = LU.NeRFData(f"scan{args.scan}", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_count=2, 
                        val_angle_equidistant=False, keep_val_in_train=True)
     module = LInstantNGP()
     logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}_m_ds")
 
     trainer = L.Trainer(
-        max_epochs=20, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
+        max_epochs=15, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
         accumulate_grad_batches=2**2, limit_train_batches=2**12 * 2**2,
         callbacks=[
             LU.OGFilterCallback(16 * 2**4, 32),
@@ -237,5 +242,5 @@ if __name__ == '__main__':
     )
 
     trainer.fit(
-        model=module, datamodule=data
+        model=module, datamodule=data,
     )
