@@ -92,56 +92,44 @@ if __name__ == '__main__':
     datadir = (proj_dir / "data" / data.hparams.source / data.hparams.name).resolve()
 
     idxs = U.data.find_rmn_angles(data.c2ws, angle_count=8)
-    origin, direction = get_origin_direction_c2w_intrinsic((1200, 1600), data.c2ws[idxs], data.intrinsics[idxs])
+    origin, direction = get_origin_direction_c2w_intrinsic(
+        (data.images.shape[1], data.images.shape[2]),
+        data.c2ws[idxs], data.intrinsics[idxs]
+    )
     alpha_mask = data.images[idxs, ..., -1] != 0
     origin, direction = origin[alpha_mask], direction[alpha_mask]
-    dl = DataLoader(TensorDataset(origin, direction), batch_size=2**19)
+    dl = DataLoader(TensorDataset(origin, direction), batch_size=2**9)
 
-    print(f"Running RayMeshNeRF Surface Point extraction for {dl.dataset.tensors[0].shape[0]:_d} rays")
-    rm_depth, sp_mask = [], []
-    for o, d in tqdm(dl, total=len(dl), unit="batch", postfix="batch_size=2^19"):
-        d, sm = model.locate_density_gradient_based_surface_depth(
-            o, d,
-            sigma_limit=5.912066757, # sigma_limit=5.912066757,  # 0.01 / sqrt(3) * 1024
-            gamma=1e-5,  # gamma=1e-9,
-            non_grad_step_size=0.0016532793661392217, # non_grad_step_size=0.001691456,  # sqrt(3) / 1024
-            min_step_size=1e-6,  # min_step_size=1 / 1024,  # 2 / (2 * sample count)
-            max_iters=2**12,  # max_iters=2**12,  # 2*2048 as non_grad_step_size requires a min of 2048 steps from near to far
-        )
-        d, sm = d.detach().cpu(), sm.cpu()
-        if model.device == torch.device("cuda:0"):
-            torch.cuda.empty_cache()
-        rm_depth.append(d)
-        sp_mask.append(sm)
-    rm_depth, sp_mask = torch.cat(rm_depth, 0), torch.cat(sp_mask, 0)
+    print(f"Running Surface Point extraction for {dl.dataset.tensors[0].shape[0]:_d} rays")
+    rm_depth = []
+    with torch.no_grad():
+        for o, di in tqdm(dl, total=len(dl), unit="batch", postfix="batch_size=2^9"):
+            o, di = o.to(model.device), di.to(model.device)
+            _, de, acc = model.render_rays(o, di)
+            de = de.unsqueeze(-1)
+            points = o + de * di
+            mask = model.nerf(points, None, skip_colors=True) < model.hparams.f_sigma_threshold
 
-    rm_points = origin + rm_depth * direction
+            near_plane = torch.sqrt(torch.sum(torch.pow(o, 2), -1, keepdim=True)) + model.near_offset
+            de[mask | (acc < 0.99) | (de < near_plane)] = torch.inf
+
+            rm_depth.append(de.cpu())
+        rm_depth = torch.cat(rm_depth, 0)
+
+    #torch.save(rm_depth, "temp.pt")
+    #rm_depth = torch.load("temp.pt")
+
+    mask = (rm_depth != torch.inf).squeeze(-1)
+    adjustment = (model.far_offset - model.near_offset) / 1024
+    rm_points = origin[mask] + (rm_depth[mask] - adjustment) * direction[mask]
     bbox_mask = (rm_points.abs() <= 1.0).all(-1)
-    rm_points, sp_mask = rm_points[bbox_mask], sp_mask[bbox_mask]
-    print(f"Points within [-1, 1] bbox limits: {rm_points.shape[0]:_d}"
-          f", of which {rm_points[sp_mask].shape[0]:_d} are Surface Points")
+    rm_points = rm_points[bbox_mask]
+    print(f"Points within [-1, 1] bbox limits: {rm_points.shape[0]:_d}")
 
     point_cloud = cloud_from_tensor(rm_points)
     cloud_path = datadir / f"rmn_cloud_raw{f'_{args.postfix}' if args.postfix else ""}.ply"
     o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
     print(f"Raw Point cloud written to {cloud_path}")
-
-    """
-    with torch.no_grad():
-        sigmas = []
-        sigma_points = DataLoader(
-            torch.from_numpy(np.asarray(point_cloud.points, dtype=np.float32)),
-            batch_size=2**19, shuffle=False
-        )
-        for sp in sigma_points:
-            sigmas.append(model.nerf(sp.to(model.device), None, skip_colors=True).cpu())
-        sigmas = torch.cat(sigmas, dim=0).squeeze(-1)
-
-    sigmas = sigmas.numpy()
-    mask = sigmas < np.quantile(sigmas, 0.75)
-    point_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(point_cloud.points)[mask]))
-    print(f"After filtering sigma < 0.75 quantile: {point_cloud}")
-    """
 
     print(f"Calculating normal vectors...")
     normals = []
@@ -155,6 +143,7 @@ if __name__ == '__main__':
     point_cloud.normals = o3d.utility.Vector3dVector(normals)
 
     point_cloud = point_cloud.voxel_down_sample(0.002)
+    point_cloud.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(100))
     print(f"After voxel downsample to 0.002 voxel size: {point_cloud}")
 
     print(f"Running DBScan clustering and Connectivity Merge filter...")
