@@ -9,6 +9,7 @@ import cv2
 from copy import copy
 import open3d as o3d
 import matplotlib.pyplot as plt
+import json
 
 from .rays import create_rays, create_intrinsic, equidistance_rotations, look_at
 from .mesh_render import render_gso_mesh
@@ -252,6 +253,32 @@ def load_dtu_data(name: str, directory: str, masked: bool = True):
     return images, c2ws, intrinsics
 
 
+def load_nesy_data(name: str, directory: str):
+    scene_dir: Path = (Path(directory) / ObjectSource.NeSy.value / name).resolve()
+
+    with open(scene_dir / "transforms_train.json", "r") as f:
+        transforms = json.load(f)
+
+    imgs, c2ws = [], []
+    for frame in transforms["frames"]:
+        image = torch.from_numpy(np.asarray(Image.open(scene_dir / f"{frame["file_path"]}.png"), dtype=np.float32))
+        imgs.append(image / 255)
+        c2ws.append(torch.tensor(frame["transform_matrix"], dtype=torch.float32))
+
+    imgs, c2ws = torch.stack(imgs, 0), torch.stack(c2ws, 0)
+
+    angle = torch.tensor(transforms["camera_angle_x"], dtype=torch.float32)
+    height, width = imgs.shape[1], imgs.shape[2]
+    focal = (width / 2.0) / torch.tan(angle / 2.0)
+    intrinsics = torch.tensor([
+        [focal, 0.0, width / 2.0],
+        [0.0, focal, height / 2.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=torch.float32).unsqueeze(0).expand(imgs.shape[0], -1, -1)
+
+    return imgs, c2ws, intrinsics
+
+
 def load_data(name: str, source: ObjectSource = ObjectSource.GSO, directory: str | None = None,
               **kwargs) -> tuple[Tensor, Tensor, Tensor]:
     """Loads object data from disk, or renders if doesn't exist, follows Google Scanned Objects mesh format
@@ -276,7 +303,7 @@ def load_data(name: str, source: ObjectSource = ObjectSource.GSO, directory: str
         case ObjectSource.DTU:
             data = load_dtu_data(name, directory, **kwargs)
         case ObjectSource.NeSy:
-            raise NotImplementedError(source)
+            data = load_nesy_data(name, directory, **kwargs)
         case _:
             raise ValueError(f"Unknown ObjectSource: {source}")
 

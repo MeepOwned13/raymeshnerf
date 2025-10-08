@@ -215,17 +215,23 @@ class LInstantNGP(LU.LVolume):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-s', '--scan', type=int, required=True)
+    parser.add_argument('source', type=str, choices=[e.value for e in U.data.ObjectSource], help="Dataset type")
+    parser.add_argument('name', type=str, help="Name of object/scene/scan")
+    parser.add_argument('-p', '--postfix', type=str, default="", help="String appended to lightning log")
     args = parser.parse_args()
 
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision('medium')
     L.seed_everything(42, workers=True)
 
-    data = LU.NeRFData(f"scan{args.scan}", U.data.ObjectSource.DTU, batch_size=2**9, val_angle_count=2, 
-                       val_angle_equidistant=False, keep_val_in_train=True)
+    val_angle_count, val_angle_equidistant, keep_val_in_train = 12, True, False
+    if U.data.ObjectSource(args.source) == U.data.ObjectSource.DTU:
+        val_angle_count, val_angle_equidistant, keep_val_in_train = 2, False, True
+
+    data = LU.NeRFData(args.name, args.source, batch_size=2**9, val_angle_count=val_angle_count, 
+                       val_angle_equidistant=val_angle_equidistant, keep_val_in_train=keep_val_in_train)
     module = LInstantNGP()
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}_m_ds")
+    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}{args.postfix}")
 
     trainer = L.Trainer(
         max_epochs=15, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,

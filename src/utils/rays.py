@@ -72,7 +72,7 @@ def create_intrinsic(focal: Tensor | tuple | list, size: Tensor | tuple | list):
 
 
 def create_rays(height: int, width: int, intrinsic: Tensor, c2w: Tensor) -> tuple[Tensor, Tensor]:
-    """Create rays cast by camera in World coordinates
+    """Create rays cast by camera in World coordinates, assumes X-right, Y-up, Z-backward system
 
     Args:
         height: Rays to take vertically (image height)
