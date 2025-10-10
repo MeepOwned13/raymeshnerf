@@ -29,12 +29,14 @@ def load_and_normalize_mesh(obj_path: Path) -> mi.Mesh:
         'filename': (obj_path / 'meshes/model.obj').as_posix(),
     })
 
-    bbox = mesh.bbox()  # Used for re-centering and scaling to -1:1 bounding box
+    # Used for re-centering and scaling to -0.95:0.95 bounding box, going lower than -1:1 to ensure NeRF can render the
+    #  whole object, as flat walls at bbox edges would be impossible
+    bbox = mesh.bbox()
 
     mesh: mi.Mesh = mi.load_dict({
         'type': 'obj',
         'filename': (obj_path / 'meshes/model.obj').as_posix(),
-        'to_world': ST().scale(1 / max(abs(bbox.max - bbox.min) / 2)).translate(-(bbox.max + bbox.min) / 2),
+        'to_world': ST().scale(0.95 / max(abs(bbox.max - bbox.min) / 2)).translate(-(bbox.max + bbox.min) / 2),
         'bsdf': {
             'type': 'diffuse',
             'reflectance': {
