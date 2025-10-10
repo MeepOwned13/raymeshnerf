@@ -80,8 +80,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="RayMeshNeRF Point Cloud generation script")
     parser.add_argument("log_name", help="Name of directory containing model under lightning_logs")
     parser.add_argument("-v", "--visualize", action="store_true", help="Visualize final point cloud?")
-    parser.add_argument("-p", "--postfix", type=str, help="String to add after filename")
+    parser.add_argument("-a", "--angles", type=int, help="Count of angles to use for reconstruction")
     args = parser.parse_args()
+
+    assert args.angles > 0  # Must be more than 0
 
     proj_dir = Path(f"{__file__}/../../").resolve()
     if not proj_dir.exists():
@@ -91,7 +93,7 @@ if __name__ == '__main__':
     model, data = load_model_and_data(log_path)
     datadir = (proj_dir / "data" / data.hparams.source / data.hparams.name).resolve()
 
-    idxs = U.data.find_rmn_angles(data.c2ws, angle_count=8)
+    idxs = U.data.find_rmn_angles(data.c2ws, angle_count=args.angles)
     origin, direction = get_origin_direction_c2w_intrinsic(
         (data.images.shape[1], data.images.shape[2]),
         data.c2ws[idxs], data.intrinsics[idxs]
@@ -158,8 +160,7 @@ if __name__ == '__main__':
     print(f"After DBScan clustering and Connectivity Merge filter: {point_cloud}")
 
     if data.hparams.source == U.data.ObjectSource.DTU:
-        scaler = np.load(datadir / "cameras.npz")["scale_mat_0"]
-        point_cloud.transform(scaler)
+        point_cloud.transform(data.scaler)
     
     cloud_path = datadir / f"rmn_cloud{f'_{args.postfix}' if args.postfix else ""}.ply"
     o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
