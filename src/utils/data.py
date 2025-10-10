@@ -204,8 +204,9 @@ def load_gso_data(name: str, directory: str, sensor_count: int = 64, size: int =
     c2ws = torch.from_numpy(data["c2ws"]).to(torch.float32)
     focal = torch.from_numpy(data["focal"]).to(torch.float32)
     intrinsics = create_intrinsic((focal, focal), (size, size)).unsqueeze(0).expand(c2ws.shape[0], -1, -1)
+    scaler = torch.eye(4, 4, dtype=torch.float32)
 
-    return images, c2ws, intrinsics
+    return images, c2ws, intrinsics, scaler
 
 
 # This function is borrowed and modified from IDR: https://github.com/lioryariv/idr
@@ -230,6 +231,7 @@ def load_dtu_data(name: str, directory: str, masked: bool = True):
     f_images = (scan_dir / "image").glob("[0-9]*.png")
     f_masks = (scan_dir / "mask").glob("[0-9]*.png")
     cameras = np.load(scan_dir / "cameras.npz")
+    scaler = cameras['scale_mat_0']  # same accross all cameras
 
     images, c2ws, intrinsics = [], [], []
     for i, (f_img, f_mask) in enumerate(zip(sorted(f_images), sorted(f_masks))):
@@ -238,7 +240,7 @@ def load_dtu_data(name: str, directory: str, masked: bool = True):
             alpha = np.asarray(Image.open(f_mask), dtype=np.float32) / 255.0
             image = np.concat([image, alpha.mean(-1, keepdims=True)], axis=-1)
 
-        proj_matrix = cameras[f'world_mat_{i}'] @ cameras[f'scale_mat_{i}']
+        proj_matrix = cameras[f'world_mat_{i}'] @ scaler
         proj_matrix = proj_matrix[:3, :4]
         c2w, intrinsic = load_K_Rt_from_P(proj_matrix)
         
@@ -249,11 +251,30 @@ def load_dtu_data(name: str, directory: str, masked: bool = True):
     images = torch.stack(images, dim=0)
     c2ws = torch.stack(c2ws, dim=0)
     intrinsics = torch.stack(intrinsics, dim=0)
+    scaler = torch.from_numpy(scaler.astype(np.float32))
 
-    return images, c2ws, intrinsics
+    return images, c2ws, intrinsics, scaler
 
 
-def load_nesy_data(name: str, directory: str):
+def scale_c2w(c2w: torch.Tensor, scale: float) -> torch.Tensor:
+    """
+    Scale camera c2w to make scene scale by a factor
+
+    Args:
+        c2w (shape[N, 4, 4]): C2W matrices
+        scale: Scaling factor
+
+    Returns:
+        scaled_c2w (shape[N, 4, 4]): Scaled C2W matrices
+    """
+    camera_positions = c2w[:, :3, 3]
+    center = torch.mean(camera_positions, axis=0)
+    scaled_c2w = c2w.clone()
+    scaled_c2w[:, :3, 3] = (c2w[:, :3, 3] - center) * scale + (center * scale)
+    return scaled_c2w
+
+
+def load_nesy_data(name: str, directory: str, scaling_factor: float = 0.75):
     scene_dir: Path = (Path(directory) / ObjectSource.NeSy.value / name).resolve()
 
     with open(scene_dir / "transforms_train.json", "r") as f:
@@ -266,6 +287,7 @@ def load_nesy_data(name: str, directory: str):
         c2ws.append(torch.tensor(frame["transform_matrix"], dtype=torch.float32))
 
     imgs, c2ws = torch.stack(imgs, 0), torch.stack(c2ws, 0)
+    c2ws = scale_c2w(c2ws, scaling_factor)  # Default 0.75 works for all NeRF Synthetic scenes
 
     angle = torch.tensor(transforms["camera_angle_x"], dtype=torch.float32)
     height, width = imgs.shape[1], imgs.shape[2]
@@ -275,8 +297,10 @@ def load_nesy_data(name: str, directory: str):
         [0.0, focal, height / 2.0],
         [0.0, 0.0, 1.0],
     ], dtype=torch.float32).unsqueeze(0).expand(imgs.shape[0], -1, -1)
+    scaler = torch.eye(4, dtype=torch.float32) * (1 / scaling_factor)
+    scaler[-1, -1] = 1
 
-    return imgs, c2ws, intrinsics
+    return imgs, c2ws, intrinsics, scaler
 
 
 def load_data(name: str, source: ObjectSource = ObjectSource.GSO, directory: str | None = None,
@@ -294,6 +318,7 @@ def load_data(name: str, source: ObjectSource = ObjectSource.GSO, directory: str
         - **images**: *shape[N, H, W, 3]*: Images
         - **c2ws**: *shape[N, 4, 4]*: Extrinisic camera matrices (Camera to World)
         - **intrinsics**: *shape[N, 3, 3]*: Intrinsic camera matrices
+        - **scaler**: *shape[4, 4]*: Matrix to re-scale results
     """
     directory = directory or f"{__file__}/../../../data"
 

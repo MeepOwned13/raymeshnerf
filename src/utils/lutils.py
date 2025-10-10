@@ -40,7 +40,7 @@ class NeRFData(L.LightningDataModule):
         return data.load_data(self.hparams.name, self.hparams.source)
 
     def setup(self, stage: str):
-        self.images, self.c2ws, self.intrinsics = self.load_from_file()
+        self.images, self.c2ws, self.intrinsics, self.scaler = self.load_from_file()
 
         # Swapping between automatic choice of "equidistant angles" and pre-set indices
         if self.hparams.val_angle_equidistant:
