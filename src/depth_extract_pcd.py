@@ -103,7 +103,7 @@ if __name__ == '__main__':
     dl = DataLoader(TensorDataset(origin, direction), batch_size=2**9)
 
     print(f"Running Surface Point extraction for {dl.dataset.tensors[0].shape[0]:_d} rays")
-    dm_depth, dm_rgb = [], []
+    dm_depth= []
     with torch.no_grad():
         for o, di in tqdm(dl, total=len(dl), unit="batch", postfix="batch_size=2^9"):
             o, di = o.to(model.device), di.to(model.device)
@@ -116,9 +116,7 @@ if __name__ == '__main__':
             de[mask | (acc < 0.99) | (de < near_plane)] = torch.inf
 
             dm_depth.append(de.cpu())
-            dm_rgb.append(rgb[..., :3])
         dm_depth = torch.cat(dm_depth, 0)
-        dm_rgb = torch.cat(dm_rgb, 0)
 
     #torch.save(dm_depth, "temp.pt")
     #dm_depth = torch.load("temp.pt")
@@ -131,7 +129,6 @@ if __name__ == '__main__':
     print(f"Points within [-1, 1] bbox limits: {dm_points.shape[0]:_d}")
 
     point_cloud = cloud_from_tensor(dm_points)
-    point_cloud.colors = o3d.utility.Vector3dVector(dm_rgb)
     cloud_path = datadir / f"dmn_cloud_raw{f'_{args.postfix}' if args.postfix else ""}.ply"
     o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
     print(f"Raw Point cloud written to {cloud_path}")
