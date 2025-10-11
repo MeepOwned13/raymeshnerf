@@ -72,7 +72,7 @@ def find_val_angles_eq(c2ws: torch.Tensor, angle_count: int = 12) -> torch.Tenso
     return torch.argmin(distances, dim=0)
 
 
-def find_rmn_angles(c2ws: torch.Tensor, angle_count: int = 8) -> list[int]:
+def find_mn_angles(c2ws: torch.Tensor, angle_count: int = 8) -> list[int]:
     """Deterministically get reconstruction angle indicies from extrinsic camera matrices using FPS
 
     Utilizes Farthest Point Sampling for angle choices, first angle is chosen as the farthest camera position from

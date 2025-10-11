@@ -51,7 +51,7 @@ if __name__ == '__main__':
     if args.mode == 'mesh':
         pbar = tqdm(total=9)
         pbar.set_description('read data mesh')
-        data_mesh = o3d.io.read_triangle_mesh(root_dir / f"data/DTU/scan{args.scan}/rmn_mesh{f'_{args.postfix}' if args.postfix else ''}.ply")
+        data_mesh = o3d.io.read_triangle_mesh(root_dir / f"data/DTU/scan{args.scan}/dmn_mesh{f'_{args.postfix}' if args.postfix else ''}.ply")
 
         vertices = np.asarray(data_mesh.vertices)
         triangles = np.asarray(data_mesh.triangles)
@@ -81,7 +81,7 @@ if __name__ == '__main__':
     elif args.mode == 'pcd':
         pbar = tqdm(total=8)
         pbar.set_description('read data pcd')
-        data_pcd_o3d = o3d.io.read_point_cloud(root_dir / f"data/DTU/scan{args.scan}/rmn_cloud{f'_{args.postfix}' if args.postfix else ''}.ply")
+        data_pcd_o3d = o3d.io.read_point_cloud(root_dir / f"data/DTU/scan{args.scan}/dmn_cloud{f'_{args.postfix}' if args.postfix else ''}.ply")
         data_pcd = np.asarray(data_pcd_o3d.points)
 
     pbar.update(1)

@@ -93,7 +93,7 @@ if __name__ == '__main__':
     model, data = load_model_and_data(log_path)
     datadir = (proj_dir / "data" / data.hparams.source / data.hparams.name).resolve()
 
-    idxs = U.data.find_rmn_angles(data.c2ws, angle_count=args.angles)
+    idxs = U.data.find_mn_angles(data.c2ws, angle_count=args.angles)
     origin, direction = get_origin_direction_c2w_intrinsic(
         (data.images.shape[1], data.images.shape[2]),
         data.c2ws[idxs], data.intrinsics[idxs]
@@ -103,7 +103,7 @@ if __name__ == '__main__':
     dl = DataLoader(TensorDataset(origin, direction), batch_size=2**9)
 
     print(f"Running Surface Point extraction for {dl.dataset.tensors[0].shape[0]:_d} rays")
-    rm_depth = []
+    dm_depth = []
     with torch.no_grad():
         for o, di in tqdm(dl, total=len(dl), unit="batch", postfix="batch_size=2^9"):
             o, di = o.to(model.device), di.to(model.device)
@@ -115,21 +115,21 @@ if __name__ == '__main__':
             near_plane = torch.sqrt(torch.sum(torch.pow(o, 2), -1, keepdim=True)) + model.near_offset
             de[mask | (acc < 0.99) | (de < near_plane)] = torch.inf
 
-            rm_depth.append(de.cpu())
-        rm_depth = torch.cat(rm_depth, 0)
+            dm_depth.append(de.cpu())
+        dm_depth = torch.cat(dm_depth, 0)
 
-    #torch.save(rm_depth, "temp.pt")
-    #rm_depth = torch.load("temp.pt")
+    #torch.save(dm_depth, "temp.pt")
+    #dm_depth = torch.load("temp.pt")
 
-    mask = (rm_depth != torch.inf).squeeze(-1)
+    mask = (dm_depth != torch.inf).squeeze(-1)
     adjustment = (model.far_offset - model.near_offset) / 1024
-    rm_points = origin[mask] + (rm_depth[mask] - adjustment) * direction[mask]
-    bbox_mask = (rm_points.abs() <= 1.0).all(-1)
-    rm_points = rm_points[bbox_mask]
-    print(f"Points within [-1, 1] bbox limits: {rm_points.shape[0]:_d}")
+    dm_points = origin[mask] + (dm_depth[mask] - adjustment) * direction[mask]
+    bbox_mask = (dm_points.abs() <= 1.0).all(-1)
+    dm_points = dm_points[bbox_mask]
+    print(f"Points within [-1, 1] bbox limits: {dm_points.shape[0]:_d}")
 
-    point_cloud = cloud_from_tensor(rm_points)
-    cloud_path = datadir / f"rmn_cloud_raw{f'_{args.postfix}' if args.postfix else ""}.ply"
+    point_cloud = cloud_from_tensor(dm_points)
+    cloud_path = datadir / f"dmn_cloud_raw{f'_{args.postfix}' if args.postfix else ""}.ply"
     o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
     print(f"Raw Point cloud written to {cloud_path}")
 
@@ -162,7 +162,7 @@ if __name__ == '__main__':
     if data.hparams.source == U.data.ObjectSource.DTU:
         point_cloud.transform(data.scaler)
     
-    cloud_path = datadir / f"rmn_cloud{f'_{args.postfix}' if args.postfix else ""}.ply"
+    cloud_path = datadir / f"dmn_cloud{f'_{args.postfix}' if args.postfix else ""}.ply"
     o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
     print(f"Point cloud written to {cloud_path}")
 

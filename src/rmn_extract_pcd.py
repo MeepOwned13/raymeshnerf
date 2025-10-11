@@ -94,7 +94,7 @@ if __name__ == '__main__':
     model, data = load_model_and_data(log_path)
     datadir = (proj_dir / "data" / data.hparams.source / data.hparams.name).resolve()
 
-    idxs = U.data.find_rmn_angles(data.c2ws, angle_count=args.angles)
+    idxs = U.data.find_mn_angles(data.c2ws, angle_count=args.angles)
     origin, direction = get_origin_direction_c2w_intrinsic(
         (data.images.shape[1], data.images.shape[2]),
         data.c2ws[idxs], data.intrinsics[idxs]
