@@ -80,6 +80,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="RayMeshNeRF Point Cloud generation script")
     parser.add_argument("log_name", help="Name of directory containing model under lightning_logs")
     parser.add_argument("-v", "--visualize", action="store_true", help="Visualize final point cloud?")
+    parser.add_argument("-p", "--postfix", type=str, help="String to add after filename")
     parser.add_argument("-a", "--angles", default=8, type=int, help="Count of angles to use for reconstruction")
     args = parser.parse_args()
 
