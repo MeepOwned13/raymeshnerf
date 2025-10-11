@@ -80,7 +80,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="RayMeshNeRF Point Cloud generation script")
     parser.add_argument("log_name", help="Name of directory containing model under lightning_logs")
     parser.add_argument("-v", "--visualize", action="store_true", help="Visualize final point cloud?")
-    parser.add_argument("-a", "--angles", type=int, help="Count of angles to use for reconstruction")
+    parser.add_argument("-a", "--angles", default=8, type=int, help="Count of angles to use for reconstruction")
     args = parser.parse_args()
 
     assert args.angles > 0  # Must be more than 0
@@ -103,11 +103,11 @@ if __name__ == '__main__':
     dl = DataLoader(TensorDataset(origin, direction), batch_size=2**9)
 
     print(f"Running Surface Point extraction for {dl.dataset.tensors[0].shape[0]:_d} rays")
-    dm_depth = []
+    dm_depth, dm_rgb = [], []
     with torch.no_grad():
         for o, di in tqdm(dl, total=len(dl), unit="batch", postfix="batch_size=2^9"):
             o, di = o.to(model.device), di.to(model.device)
-            _, de, acc = model.render_rays(o, di)
+            rgb, de, acc = model.render_rays(o, di)
             de = de.unsqueeze(-1)
             points = o + de * di
             mask = model.nerf(points, None, skip_colors=True) < model.hparams.f_sigma_threshold
@@ -116,7 +116,9 @@ if __name__ == '__main__':
             de[mask | (acc < 0.99) | (de < near_plane)] = torch.inf
 
             dm_depth.append(de.cpu())
+            dm_rgb.append(rgb[..., :3])
         dm_depth = torch.cat(dm_depth, 0)
+        dm_rgb = torch.cat(dm_rgb, 0)
 
     #torch.save(dm_depth, "temp.pt")
     #dm_depth = torch.load("temp.pt")
@@ -129,9 +131,12 @@ if __name__ == '__main__':
     print(f"Points within [-1, 1] bbox limits: {dm_points.shape[0]:_d}")
 
     point_cloud = cloud_from_tensor(dm_points)
+    point_cloud.colors = o3d.utility.Vector3dVector(dm_rgb)
     cloud_path = datadir / f"dmn_cloud_raw{f'_{args.postfix}' if args.postfix else ""}.ply"
     o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
     print(f"Raw Point cloud written to {cloud_path}")
+
+    exit(0)
 
     print(f"Calculating normal vectors...")
     normals = []
