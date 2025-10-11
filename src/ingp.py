@@ -84,7 +84,7 @@ class LInstantNGP(LU.LVolume):
             perturb=not deterministic,
         )
         rgbs = self.nerf(points, expanded_directions)
-        rgb, depth, acc, _, _ = U.rays.render_rays(
+        rgb, depth, acc, _ = U.rays.render_rays(
             origins=origins, rgbs=rgbs, depths=depths, far_offset=self.far_offset
         )
         return rgb, depth, acc
@@ -101,7 +101,7 @@ class LInstantNGP(LU.LVolume):
             perturb=True,
         )
         p_rgbs = self.nerf(points, expanded_directions)
-        p_rgb, _, p_alpha, _, p_weights = U.rays.render_rays(
+        p_rgb, _, p_alpha, p_weights = U.rays.render_rays(
             origins=origins, rgbs=p_rgbs, depths=depths, far_offset=self.far_offset
         )
 
@@ -109,15 +109,17 @@ class LInstantNGP(LU.LVolume):
         noise = torch.empty_like(p_rgb).uniform_(self.background_noise_range[0], self.background_noise_range[1])
         mixed_pred_colors = p_rgb * p_alpha + noise * (1 - p_alpha)
 
+        eps = torch.finfo(p_weights.dtype).eps
         if colors.shape[-1] == 4:  # RGBA
             colors, alphas = colors[..., :3], colors[..., 3:4]
             mixed_colors = colors * alphas + noise * (1 - alphas)
-            loss = self.lossf(mixed_pred_colors, mixed_colors)
+            # In masked scenarios, addition BCE loss is applied (adding eps to avoid log(0))
+            loss = self.lossf(mixed_pred_colors, mixed_colors) +\
+                1e-2 * -(alphas * torch.log(p_alpha + eps) + (1 - alphas) * torch.log(1 - p_alpha + eps)).mean()
         else:  # RGB
             loss = self.lossf(mixed_pred_colors, colors)
 
         distances = U.rays.depths_to_distance(origins=origins, depths=depths, far_offset=self.far_offset)
-        eps = torch.finfo(p_weights.dtype).eps
         # Depth supervision loss https://www.cs.cmu.edu/~dsnerf/
         # Weights in this implementation are already multiplied by distances => redividing by distances for first term
         dsm = (sfm_errors != torch.inf).squeeze(-1)  # depth supervision mask
@@ -155,7 +157,7 @@ class LInstantNGP(LU.LVolume):
                 row_indices = torch.arange(
                     batch_size, device=self.device
                 ).unsqueeze(1).expand(-1, self.hparams.ray_tv_sample_count)
-                ch_rgbs = p_rgbs[row_indices, ch_idxs, :]
+                ch_sigma = p_rgbs[row_indices, ch_idxs, -1:]
                 ch_points, ch_dirs = points[row_indices, ch_idxs, :], expanded_directions[row_indices, ch_idxs, :]
 
                 # Offset with random perpendicular (to each other as well) vectors
@@ -171,15 +173,14 @@ class LInstantNGP(LU.LVolume):
                 offset = 0.0033829116728156805
                 if self.hparams.ray_tv_sample_count < 2 ** 9:
                     # Catting the x and y shift to make the calculation a single call
-                    a_rgbs, b_rgbs = self.nerf(
-                        torch.cat([ch_points + a * offset, ch_points + b * offset], dim=0),
-                        torch.cat([ch_dirs, ch_dirs], dim=0)
+                    a_sigma, b_sigma = self.nerf(
+                        torch.cat([ch_points + a * offset, ch_points + b * offset], dim=0), None, skip_colors=True
                     ).split(batch_size, dim=0)
                 else:  # Needs to be 2 calls to stay under 2^19 kernel size limit (2**9 batch size * sample_count)
-                    a_rgbs= self.nerf(ch_points + a * offset, ch_dirs)
-                    b_rgbs= self.nerf(ch_points + b * offset, ch_dirs)
+                    a_sigma= self.nerf(ch_points + a * offset, None, skip_colors=True)
+                    b_sigma= self.nerf(ch_points + b * offset, None, skip_colors=True)
 
-                rtv = torch.abs(ch_rgbs - a_rgbs) + torch.abs(ch_rgbs - b_rgbs)
+                rtv = torch.abs(ch_sigma - a_sigma) + torch.abs(ch_sigma - b_sigma)
                 rtv = rtv.sum(-1).sum(-1).mean()
                 loss += rtv * tv_loss_weight * self.hparams.ray_tv_loss_mult
 
@@ -224,18 +225,19 @@ if __name__ == '__main__':
         torch.set_float32_matmul_precision('medium')
     L.seed_everything(42, workers=True)
 
-    val_angle_count, val_angle_equidistant, keep_val_in_train = 12, True, False
+    val_angle_count, val_angle_equidistant, keep_val_in_train, accumulate_factor = 8, True, False, 2
     if U.data.ObjectSource(args.source) == U.data.ObjectSource.DTU:
-        val_angle_count, val_angle_equidistant, keep_val_in_train = 2, False, True
+        val_angle_count, val_angle_equidistant, keep_val_in_train, accumulate_factor = 2, False, True, 4
 
     data = LU.NeRFData(args.name, args.source, batch_size=2**9, val_angle_count=val_angle_count, 
                        val_angle_equidistant=val_angle_equidistant, keep_val_in_train=keep_val_in_train)
     module = LInstantNGP()
-    logger = TensorBoardLogger(".", default_hp_metric=False, version=f"ingp_{data.scene_name}{args.postfix}")
+    logger = TensorBoardLogger(".", default_hp_metric=False,
+                               version=f"ingp_{data.scene_name}{f'_{args.postfix}' if args.postfix else ''}")
 
     trainer = L.Trainer(
         max_epochs=15, check_val_every_n_epoch=1, log_every_n_steps=1, logger=logger,
-        accumulate_grad_batches=2**2, limit_train_batches=2**12 * 2**2,
+        accumulate_grad_batches=accumulate_factor, limit_train_batches=2**12 * accumulate_factor,
         callbacks=[
             LU.OGFilterCallback(16 * 2**4, 32),
             LearningRateMonitor(logging_interval="epoch"),

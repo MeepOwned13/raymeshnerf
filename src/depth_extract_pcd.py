@@ -104,7 +104,7 @@ if __name__ == '__main__':
     dl = DataLoader(TensorDataset(origin, direction), batch_size=2**9)
 
     print(f"Running Surface Point extraction for {dl.dataset.tensors[0].shape[0]:_d} rays")
-    dm_depth= []
+    dm_depth = []
     with torch.no_grad():
         for o, di in tqdm(dl, total=len(dl), unit="batch", postfix="batch_size=2^9"):
             o, di = o.to(model.device), di.to(model.device)
