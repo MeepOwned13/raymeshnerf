@@ -301,12 +301,17 @@ def scale_c2w(c2w: torch.Tensor, scale: float) -> torch.Tensor:
 
     Returns:
         scaled_c2w (shape[N, 4, 4]): Scaled C2W matrices
+        scaler (shape[4, 4]): Reverse scaling matrix for reconstruction
     """
     camera_positions = c2w[:, :3, 3]
     center = torch.mean(camera_positions, axis=0)
     scaled_c2w = c2w.clone()
     scaled_c2w[:, :3, 3] = (c2w[:, :3, 3] - center) * scale + (center * scale)
-    return scaled_c2w
+
+    scaler = torch.eye(4, dtype=torch.float32) 
+    scaler[:3, :3] /= scale
+
+    return scaled_c2w, scaler
 
 
 def load_nesy_data(name: str, directory: str, scaling_factor: float = 0.7):
@@ -322,7 +327,7 @@ def load_nesy_data(name: str, directory: str, scaling_factor: float = 0.7):
         c2ws.append(torch.tensor(frame["transform_matrix"], dtype=torch.float32))
 
     imgs, c2ws = torch.stack(imgs, 0), torch.stack(c2ws, 0)
-    c2ws = scale_c2w(c2ws, scaling_factor)  # Default 0.7 works for all NeRF Synthetic scenes
+    c2ws, scaler = scale_c2w(c2ws, scaling_factor)  # Default 0.7 works for all NeRF Synthetic scenes
 
     angle = torch.tensor(transforms["camera_angle_x"], dtype=torch.float32)
     height, width = imgs.shape[1], imgs.shape[2]
@@ -332,8 +337,6 @@ def load_nesy_data(name: str, directory: str, scaling_factor: float = 0.7):
         [0.0, focal, height / 2.0],
         [0.0, 0.0, 1.0],
     ], dtype=torch.float32).unsqueeze(0).expand(imgs.shape[0], -1, -1)
-    scaler = torch.eye(4, dtype=torch.float32) * (1 / scaling_factor)
-    scaler[-1, -1] = 1
 
     return imgs, c2ws, intrinsics, scaler
 
