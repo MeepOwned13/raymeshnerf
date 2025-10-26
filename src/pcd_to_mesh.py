@@ -35,6 +35,11 @@ if __name__ == '__main__':
         vertices_to_remove = densities < np.quantile(densities, args.remove_quantile)
         mesh.remove_vertices_by_mask(vertices_to_remove)
 
+    # Removing any mesh part that has a small amount of triangles, results of noise
+    i, c, a = mesh.cluster_connected_triangles()
+    i, c, a = np.asarray(i), np.asarray(c), np.asarray(a)
+    mesh.remove_triangles_by_mask(np.isin(i, np.where(c < 1000)))
+
     # Remove unused vertices and tidy up
     mesh.remove_unreferenced_vertices()
     mesh.remove_degenerate_triangles()
@@ -44,5 +49,5 @@ if __name__ == '__main__':
         o3d.visualization.draw_geometries([mesh])
 
     mesh_path = (pcd_path / ".." / f"{pcd_path.stem.replace("cloud", "mesh")}{f'_{args.postfix}' if args.postfix else ''}.ply").resolve()
-    o3d.io.write_triangle_mesh(mesh_path, mesh)
+    o3d.io.write_triangle_mesh(mesh_path, mesh, write_ascii=True)
     print(f"Mesh written to {mesh_path}")

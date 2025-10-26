@@ -307,3 +307,48 @@ def render_rays(origins: Tensor, rgbs: Tensor, depths: Tensor, far_offset: float
     acc = torch.sum(weights, dim=-1).unsqueeze(-1).clamp(0.0, 1.0)  # Clamp to counter numerical errors
 
     return rgb, depth, acc, weights
+
+
+def get_render_weights(origins: Tensor, sigma: Tensor, depths: Tensor, far_offset: float,
+                       re_weigh_alpha: float = 1.0) -> Tensor:
+    """Calculates weights for Volumetric Rendering
+
+    Args:
+        origins (shape[N, 3]): Ray origins in World coordinates
+        sigma (shape[N, M, 1]): Sigma values for sampled points
+        depths (shape[N, M]): Specifies how far along the rays are the RGBSs
+        far_offset: Far plane offset from World origin, generally positive
+        re_weigh_alpha: Allows for making alpha 1.0, where it wouldn't be, rendering thin surfaces fully, any ray where
+            the alpha is above this parameter gets scaled
+
+    Returns:
+        weights (shape[N, M]): Render weight per sample point
+    """
+    device = sigma.device
+    distances = depths_to_distance(origins, depths, far_offset)
+
+    alpha = 1.0 - torch.exp(-F.relu(sigma.squeeze(-1)) * distances)
+    weights = alpha * torch.cumprod(
+        torch.cat([torch.ones((alpha.shape[0], 1), device=device), 1. - alpha + torch.finfo(sigma.dtype).eps], -1), -1
+    )[:, :-1]
+
+    if re_weigh_alpha < 1.0:
+        alpha = weights.sum(-1, keepdim=True).clamp(0, 1.0)
+        weights = weights / torch.where(alpha > re_weigh_alpha, alpha, 1.0)
+
+    return weights
+
+
+def render_value(weights: Tensor, values: Tensor) -> Tensor:
+    """Performs Volumetric Rendering with weights for values
+
+    Args:
+        weights (shape[N, M] | shape[N, M, 1]): Render weight per sample point
+        values (shape[N, M, K]): Values for sampled points
+
+    Returns:
+        rendered (shape[N, K]): Rendered value per ray
+    """
+    if weights.ndim != 3:
+        weights = weights.unsqueeze(-1)
+    return torch.sum(weights * values, dim=-2)

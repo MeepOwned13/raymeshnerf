@@ -5,6 +5,8 @@ import lightning as L
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 import argparse
+import open3d as o3d
+import numpy as np
 
 import utils as U
 import utils.lutils as LU
@@ -73,7 +75,7 @@ class LInstantNGP(LU.LVolume):
         self.background_noise_range = [0.0, 1.0]
 
     def render_rays(self, origins: Tensor, directions: Tensor, deterministic: bool = True,
-                    **kwargs) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+                    re_weigh_alpha: float = 1.0, **kwargs) -> tuple[Tensor, Tensor, Tensor, Tensor]:
 
         points, expanded_directions, depths = U.rays.sample_ray_uniformally(
             origins=origins,
@@ -84,10 +86,13 @@ class LInstantNGP(LU.LVolume):
             perturb=not deterministic,
         )
         rgbs = self.nerf(points, expanded_directions)
-        rgb, depth, acc, _ = U.rays.render_rays(
-            origins=origins, rgbs=rgbs, depths=depths, far_offset=self.far_offset
-        )
-        return rgb, depth, acc
+
+        weights = U.rays.get_render_weights(origins, rgbs[..., -1:], depths, self.far_offset, re_weigh_alpha)
+        rgb = U.rays.render_value(weights, rgbs[..., :-1]).clip(0.0, 1.0)
+        depth = U.rays.render_value(weights, depths.unsqueeze(-1))
+        alpha = torch.sum(weights, dim=-1, keepdim=True).clamp(0.0, 1.0)
+
+        return rgb, depth, alpha, dict()
     
     def calculate_loss(self, origins, directions, colors, sfm_depths, sfm_errors):
         batch_size = origins.shape[0]
@@ -101,9 +106,10 @@ class LInstantNGP(LU.LVolume):
             perturb=True,
         )
         p_rgbs = self.nerf(points, expanded_directions)
-        p_rgb, _, p_alpha, p_weights = U.rays.render_rays(
-            origins=origins, rgbs=p_rgbs, depths=depths, far_offset=self.far_offset
-        )
+
+        p_weights = U.rays.get_render_weights(origins, p_rgbs[..., -1:], depths, self.far_offset)
+        p_rgb = U.rays.render_value(p_weights, p_rgbs[..., :-1]).clip(0.0, 1.0)
+        p_alpha = torch.sum(p_weights, dim=-1, keepdim=True).clamp(0.0, 1.0)
 
         # Background noise, skews towards 0 alpha in GT 0 alpha for RGBA, skews towards 1 alpha in RGB scenarios
         noise = torch.empty_like(p_rgb).uniform_(self.background_noise_range[0], self.background_noise_range[1])
@@ -174,17 +180,17 @@ class LInstantNGP(LU.LVolume):
                 if self.hparams.ray_tv_sample_count < 2 ** 9:
                     # Catting the x and y shift to make the calculation a single call
                     a_sigma, b_sigma = self.nerf(
-                        torch.cat([ch_points + a * offset, ch_points + b * offset], dim=0), None, skip_colors=True
+                        torch.cat([ch_points + a * offset, ch_points + b * offset], dim=0), None, only_sigma=True
                     ).split(batch_size, dim=0)
                 else:  # Needs to be 2 calls to stay under 2^19 kernel size limit (2**9 batch size * sample_count)
-                    a_sigma= self.nerf(ch_points + a * offset, None, skip_colors=True)
-                    b_sigma= self.nerf(ch_points + b * offset, None, skip_colors=True)
+                    a_sigma= self.nerf(ch_points + a * offset, None, only_sigma=True)
+                    b_sigma= self.nerf(ch_points + b * offset, None, only_sigma=True)
 
                 rtv = torch.abs(ch_sigma - a_sigma) + torch.abs(ch_sigma - b_sigma)
                 rtv = rtv.sum(-1).sum(-1).mean()
                 loss += rtv * tv_loss_weight * self.hparams.ray_tv_loss_mult
-
-        return loss 
+        
+        return loss
     
     def configure_optimizers(self):
         optimizer = torch.optim.RAdam([
@@ -212,6 +218,20 @@ class LInstantNGP(LU.LVolume):
                 "frequency": 1,
             }
         }
+
+
+def get_origin_direction_c2w_intrinsic(img_shape, c2ws, intrinsics):
+    origin, direction = [], []
+    for c2w, intrinsic in zip(c2ws, intrinsics):
+        o, d = U.rays.create_rays(img_shape[0], img_shape[1], intrinsic, c2w)
+        origin.append(o)
+        direction.append(d)
+
+    return torch.stack(origin), torch.stack(direction)
+
+
+def cloud_from_tensor(tens):
+    return o3d.geometry.PointCloud(o3d.utility.Vector3dVector(tens.cpu()))
 
 
 if __name__ == '__main__':

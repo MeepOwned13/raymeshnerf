@@ -120,8 +120,8 @@ class LVolume(L.LightningModule):
         if stage == "fit":
             self.lossf = MSELoss()
     
-    def render_rays(self, origins: Tensor, directions: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Render rays ready for display (e.g. don't return separate coarse, fine colors)
+    def render_rays(self, origins: Tensor, directions: Tensor) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
+        """Render rays ready for display/use
 
         Args:
             origins (shape[N, 3]): Ray origins in World coordinates
@@ -130,8 +130,9 @@ class LVolume(L.LightningModule):
         Returns:
             tuple: a tuple containing (rgb, depth, acc) where
             - **rgb**: *shape[N, 3]*: RGB value calculated for ray,
-            - **depth**: *shape[N]*: Approximated depth of ray termination,
-            - **acc**: *shape[N, 1]*: Sum of weights for pixel (alpha)
+            - **depth**: *shape[N, 1]*: Approximated depth of ray termination,
+            - **alpha**: *shape[N, 1]*: Sum of weights for pixel
+            - **extras**: *dict of shape[N, 3]*: Dictionary of extra, rendered params such as normal vector...
         """
         raise NotImplementedError(f"{self.__class__} hasn't implemented render_rays yet")
     
@@ -179,7 +180,7 @@ class LVolume(L.LightningModule):
 
         image = []
         for o, d in data:
-            rgb, _, alpha = self.render_rays(
+            rgb, _, alpha, _ = self.render_rays(
                 origins=o,
                 directions=d,
             )
@@ -244,10 +245,10 @@ class LVolume(L.LightningModule):
 
                 # delta_sigma/delta_depth calculated
                 sigma = torch.log(
-                    self.nerf(masked_origins + masked_depth * masked_directions, masked_directions, skip_colors=True)
+                    self.nerf(masked_origins + masked_depth * masked_directions, masked_directions, only_sigma=True)
                 )
                 sigma_nx = torch.log(
-                    self.nerf(masked_origins + (masked_depth + 1e-6) * masked_directions, masked_directions, skip_colors=True)
+                    self.nerf(masked_origins + (masked_depth + 1e-6) * masked_directions, masked_directions, only_sigma=True)
                 )
                 grad = (sigma_nx - sigma) / 1e-6
 
@@ -302,10 +303,10 @@ class LVolume(L.LightningModule):
         coords.requires_grad = True
         coords.retain_grad()
 
-        sigmas = self.nerf(coords, None, skip_colors=True)
+        sigmas = self.nerf(coords, None, only_sigma=True)
         sigmas.backward(torch.ones_like(sigmas))
 
-        normals = -torch.nn.functional.normalize(coords.grad, p="fro", dim=-1)
+        normals = -torch.nn.functional.normalize(coords.grad, p=2, dim=-1)
         return normals
 
     def training_step(self, batch, batch_idx):

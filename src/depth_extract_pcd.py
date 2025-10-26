@@ -82,25 +82,42 @@ if __name__ == '__main__':
     parser.add_argument("-v", "--visualize", action="store_true", help="Visualize final point cloud?")
     parser.add_argument("-p", "--postfix", type=str, help="String to add after filename")
     parser.add_argument("-a", "--angles", default=8, type=int, help="Count of angles to use for reconstruction")
+    parser.add_argument("-aa", "--additional_angles", default=0, type=int,
+                        help="Count of angles to add from unseen angles")
     args = parser.parse_args()
 
     assert args.angles > 0  # Must be more than 0
 
     proj_dir = Path(f"{__file__}/../../").resolve()
-    if not proj_dir.exists():
-        raise ValueError(f"Specified logs at {proj_dir} don't exist")
     log_path = (proj_dir / "lightning_logs" / args.log_name).resolve()
+    if not log_path.exists():
+        raise ValueError(f"Specified logs at {log_path} don't exist")
     
     model, data = load_model_and_data(log_path)
     datadir = (proj_dir / "data" / data.hparams.source / data.hparams.name).resolve()
 
+    # Angles from existing views
     idxs = U.data.find_mn_angles(data.c2ws, angle_count=args.angles)
+    c2ws, intrinsics = data.c2ws[idxs], data.intrinsics[idxs]
     origin, direction = get_origin_direction_c2w_intrinsic(
         (data.images.shape[1], data.images.shape[2]),
-        data.c2ws[idxs], data.intrinsics[idxs]
+        c2ws, intrinsics
     )
     alpha_mask = data.images[idxs, ..., -1] != 0
     origin, direction = origin[alpha_mask], direction[alpha_mask]
+
+    # Additional angles can help with almost 360 reconstructions where e.q. the bottom of a chair wasn't photographed
+    if args.additional_angles > 0:
+        new_c2ws = U.data.suggest_new_eq_angles(c2ws, args.additional_angles)
+        new_intrinsics = intrinsics[:1].expand(new_c2ws.shape[0], -1, -1)
+        new_o, new_d = get_origin_direction_c2w_intrinsic(
+            (data.images.shape[1], data.images.shape[2]),
+            new_c2ws, new_intrinsics
+        )
+        origin = torch.cat([origin, new_o.flatten(0, -2)], dim=0)
+        direction = torch.cat([direction, new_d.flatten(0, -2)], dim=0)
+        c2ws, intrinsics = torch.cat([c2ws, new_c2ws], dim=0), torch.cat([intrinsics, new_intrinsics], dim=0)
+
     dl = DataLoader(TensorDataset(origin, direction), batch_size=2**9)
 
     print(f"Running Surface Point extraction for {dl.dataset.tensors[0].shape[0]:_d} rays")
@@ -108,10 +125,9 @@ if __name__ == '__main__':
     with torch.no_grad():
         for o, di in tqdm(dl, total=len(dl), unit="batch", postfix="batch_size=2^9"):
             o, di = o.to(model.device), di.to(model.device)
-            rgb, de, acc = model.render_rays(o, di)
-            de = de.unsqueeze(-1)
+            _, de, acc, _ = model.render_rays(o, di, re_weigh_alpha=0.25)
             points = o + de * di
-            mask = model.nerf(points, None, skip_colors=True) < model.hparams.f_sigma_threshold
+            mask = model.nerf(points, None, only_sigma=True) < model.hparams.f_sigma_threshold
 
             near_plane = torch.sqrt(torch.sum(torch.pow(o, 2), -1, keepdim=True)) + model.near_offset
             de[mask | (acc < 0.99) | (de < near_plane)] = torch.inf
@@ -119,11 +135,11 @@ if __name__ == '__main__':
             dm_depth.append(de.cpu())
         dm_depth = torch.cat(dm_depth, 0)
 
-    #torch.save(dm_depth, "temp.pt")
-    #dm_depth = torch.load("temp.pt")
+    #torch.save(dm_depth, datadir / "temp.pt")
+    #dm_depth = torch.load(datadir / "temp.pt")
 
     mask = (dm_depth != torch.inf).squeeze(-1)
-    adjustment = (model.far_offset - model.near_offset) / 1024
+    adjustment = (model.far_offset - model.near_offset) / 1024 / 2
     dm_points = origin[mask] + (dm_depth[mask] - adjustment) * direction[mask]
     bbox_mask = (dm_points.abs() <= 1.0).all(-1)
     dm_points = dm_points[bbox_mask]
@@ -133,8 +149,6 @@ if __name__ == '__main__':
     cloud_path = datadir / f"dmn_cloud_raw{f'_{args.postfix}' if args.postfix else ""}.ply"
     o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
     print(f"Raw Point cloud written to {cloud_path}")
-
-    exit(0)
 
     print(f"Calculating normal vectors...")
     normals = []
@@ -148,23 +162,37 @@ if __name__ == '__main__':
     point_cloud.normals = o3d.utility.Vector3dVector(normals)
 
     point_cloud = point_cloud.voxel_down_sample(0.002)
-    point_cloud.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(100))
     print(f"After voxel downsample to 0.002 voxel size: {point_cloud}")
 
+    visibility_mask, back_face_mask = U.clouds.get_visibility_mask(
+        torch.from_numpy(np.asarray(point_cloud.points, dtype=np.float32)).to(model.device),
+        torch.from_numpy(np.asarray(point_cloud.normals, dtype=np.float32)).to(model.device),
+        c2ws.to(model.device), intrinsics.to(model.device),
+        image_size=tuple(data.images.shape[1:3]),
+        pixel_scaler=4 if data.hparams.source == U.data.ObjectSource.DTU else 2,
+        depth_tolerance=0.002, min_visibility=1, max_back_face=0,
+    )
+    point_cloud = U.clouds.filter_cloud_by_mask(
+        point_cloud, (visibility_mask & (~back_face_mask)).cpu().numpy()
+    )
+    print(f"After visibility and backface filter: {point_cloud}")
+
+    # This smooths normal vectors quite effectively
+    point_cloud.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(100))
+
     print(f"Running DBScan clustering and Connectivity Merge filter...")
-    labels = U.data.dbscan_and_connected_merge(point_cloud, eps=0.01, iters=3)
+    labels = U.data.dbscan_and_connected_merge(point_cloud, eps=0.01, iters=3, merge_distance=0.02)
     v, c = np.unique_counts(labels)
     obj_label = v[c.argmax()]
 
-    normals = np.asarray(point_cloud.normals)[labels == obj_label]
-    point_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(point_cloud.points)[labels == obj_label]))
-    point_cloud.normals = o3d.utility.Vector3dVector(normals)
+    dbscan_mask = labels == obj_label
+    point_cloud = U.clouds.filter_cloud_by_mask(point_cloud, dbscan_mask)
     point_cloud.paint_uniform_color([0.5, 0.5, 0.5])
     print(f"After DBScan clustering and Connectivity Merge filter: {point_cloud}")
 
-    if data.hparams.source == U.data.ObjectSource.DTU:
-        point_cloud.transform(data.scaler)
-    
+    point_cloud.transform(data.scaler)
+    point_cloud = point_cloud.normalize_normals()
+
     cloud_path = datadir / f"dmn_cloud{f'_{args.postfix}' if args.postfix else ""}.ply"
     o3d.io.write_point_cloud(cloud_path, point_cloud, write_ascii=True)
     print(f"Point cloud written to {cloud_path}")

@@ -222,7 +222,6 @@ class InstantNGP(nn.Module):
         """Init
 
         Args:
-            hidden_size: Hidden size for Linear layers
             encoding_log2: Log2 of encoding count for MLHHE
             embed_dims: Output embedding dimensions for MLHHE
             levels: Level count for MLHHE
@@ -264,7 +263,6 @@ class InstantNGP(nn.Module):
             nn.Linear(hidden_size, 16),  # index 0 is log density
         )
         """MLP processing encoded coordinates, output at index 0 is log of sigma"""
-
         nn.init.constant_(self.feature_mlp[-1].bias[:1], -1.0)
 
         self.direction_encoder = SphericalHarmonicsBasisEncoding(3)
@@ -275,14 +273,14 @@ class InstantNGP(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, hidden_size), 
             nn.ReLU(inplace=True),
             nn.Linear(hidden_size, 3),
             nn.Sigmoid(),
         )
         """MLP processing features and directions to generate RGB values"""
 
-    def forward(self, coordinates: Tensor, directions: Tensor, skip_colors: bool = False, masked: bool = True):
+    def forward(self, coordinates: Tensor, directions: Tensor, only_sigma: bool = False, masked: bool = True):
         """Perform RGBS calculation
 
         coordinates and directions must have the same dimensions for *...
@@ -290,11 +288,11 @@ class InstantNGP(nn.Module):
         Args:
             coordinates (shape[..., in_coordinates]): Input point coordinates
             directions (shape[..., in_directions]): Input directions
-            skip_colors: Skip color calculation?
+            only_sigma: Skip color calculation?
             masked: Use occupancy grid filtering?
 
         Returns:
-            Tensor: RGBS (skip_colors=True) or Sigma (skip_colors=False)
+            Tensor: RGBS (only_sigma=True) or Sigma (only_sigma=False)
                 - **rgbs**: *shape[..., 4]*: RGB&Sigma
                 - **sigma**: *shape[..., 1]*: Sigma
         """
@@ -314,7 +312,7 @@ class InstantNGP(nn.Module):
         features = self.feature_mlp(embeds)
         sigma[mask] = torch.exp(features[..., 0:1])
 
-        if skip_colors:
+        if only_sigma:
             return sigma.reshape(out_shape + [1])
 
         directions = directions.reshape(-1, 3)

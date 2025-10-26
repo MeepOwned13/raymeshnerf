@@ -107,7 +107,7 @@ class OccupancyGridFilter(torch.nn.Module):
         chunks = torch.arange(0, xyz_ndc.shape[0], kernel_lim)
         for c in chunks:
             d[c:c+kernel_lim] = nerf(
-                xyz_ndc[c:c+kernel_lim], directions=None, skip_colors=True, masked=False
+                xyz_ndc[c:c+kernel_lim], directions=None, only_sigma=True, masked=False
             ).squeeze(-1)
 
         cur = self.density_grid[ijk[:, 2], ijk[:, 1], ijk[:, 0]]
