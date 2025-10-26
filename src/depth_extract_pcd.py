@@ -183,9 +183,9 @@ if __name__ == '__main__':
     print(f"Running DBScan clustering and Connectivity Merge filter...")
     labels = U.data.dbscan_and_connected_merge(point_cloud, eps=0.01, iters=3, merge_distance=0.02)
     v, c = np.unique_counts(labels)
-    obj_label = v[c.argmax()]
+    v = v[c > (len(point_cloud.points) * 0.01)]  # Clusters contributing at least 1% to overall PCD are kept
 
-    dbscan_mask = labels == obj_label
+    dbscan_mask = np.isin(labels, v)
     point_cloud = U.clouds.filter_cloud_by_mask(point_cloud, dbscan_mask)
     point_cloud.paint_uniform_color([0.5, 0.5, 0.5])
     print(f"After DBScan clustering and Connectivity Merge filter: {point_cloud}")
