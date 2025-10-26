@@ -382,7 +382,9 @@ class DSNeRFAlphaBatchSampler(torch.utils.data.Sampler):
 
         Args:
             ds_mask (shape[N]): Depth Supervision mask, True where SFM depth is specified
+            alpha_mask (shape[N]): Alpha mask, specifies where alpha=0 (or other threshold)
             ds_ratio: Ratio of the batch to draw SFM depth specified indices, count rounded from (batch_size*ds_ratio)
+            alpha_ratio: Ratio of alpha_mask=True samples in batch
             batch_size: Batch size (includes DS and non-DS samples)
         """
         super(DSNeRFAlphaBatchSampler, self).__init__()
