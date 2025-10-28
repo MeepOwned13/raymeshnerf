@@ -107,6 +107,8 @@ if __name__ == '__main__':
     origin, direction = origin[alpha_mask], direction[alpha_mask]
 
     # Additional angles can help with almost 360 reconstructions where e.q. the bottom of a chair wasn't photographed
+    #  the additional angles give a complete mesh but can't be relied on for accuracy, generally filled in wherever the
+    #  training views didn't see. 'ship' is a good example with a cone like bottom.
     if args.additional_angles > 0:
         new_c2ws = U.data.suggest_new_eq_angles(c2ws, args.additional_angles)
         new_intrinsics = intrinsics[:1].expand(new_c2ws.shape[0], -1, -1)
