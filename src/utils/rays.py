@@ -336,6 +336,19 @@ def get_render_weights(origins: Tensor, sigma: Tensor, depths: Tensor, far_offse
         alpha = weights.sum(-1, keepdim=True).clamp(0, 1.0)
         weights = weights / torch.where(alpha > re_weigh_alpha, alpha, 1.0)
 
+        rendered_depth = render_value(weights, depths.unsqueeze(-1))
+        after_depth_mask = depths > rendered_depth
+        idx_of_depth = after_depth_mask.int().argmax(-1)
+        idxer = torch.arange(0, weights.shape[0])
+        dual_surface_points =\
+            (weights[idxer, idx_of_depth] < torch.finfo(sigma.dtype).eps) &\
+            (weights[idxer, (idx_of_depth - 1).clamp(0, weights.shape[1] - 1)] < torch.finfo(sigma.dtype).eps)
+        dsp = dual_surface_points.squeeze(-1)
+        
+        first_surface_alpha = torch.where(~after_depth_mask[dsp], weights[dsp].cumsum(-1), 0.0).amax(-1, keepdim=True)
+        weights[dsp] = weights[dsp] / torch.where(first_surface_alpha > re_weigh_alpha, first_surface_alpha, 1.0)
+        weights[dsp] = torch.where(~after_depth_mask[dsp], weights[dsp], 0.0)
+
     return weights
 
 
