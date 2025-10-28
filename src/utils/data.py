@@ -314,10 +314,12 @@ def scale_c2w(c2w: torch.Tensor, scale: float) -> torch.Tensor:
     return scaled_c2w, scaler
 
 
-def load_nesy_data(name: str, directory: str, scaling_factor: float = 0.7):
+def load_nesy_data(name: str, directory: str, scaling_factor: float = 0.7, phase: str = "train"):
+    assert phase in ["train", "val", "test"]  # Can only be these 3 for NeRF Synthetic
+
     scene_dir: Path = (Path(directory) / ObjectSource.NeSy.value / name).resolve()
 
-    with open(scene_dir / "transforms_train.json", "r") as f:
+    with open(scene_dir / f"transforms_{phase}.json", "r") as f:
         transforms = json.load(f)
 
     imgs, c2ws = [], []
