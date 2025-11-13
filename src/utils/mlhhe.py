@@ -282,8 +282,8 @@ class MultiLevelHybridHashEncoding(torch.nn.Module):
             vy_emb = embeddings[li.fn_hash(vy, li.shape, li.n_encodings)]
             vz_emb = embeddings[li.fn_hash(vz, li.shape, li.n_encodings)]
 
-            # Anisotropic Total Variation loss
-            tv = torch.abs(v_emb - vx_emb) + torch.abs(v_emb - vy_emb) + torch.abs(v_emb - vz_emb)
+            # Total Variation loss based on total-variation norm denoising
+            tv = torch.sqrt((v_emb - vx_emb) ** 2 + (v_emb - vy_emb) ** 2 + (v_emb - vz_emb) ** 2 + 1e-8)
             tv = tv.sum(-1).mean(0)
             total_tv += tv
 

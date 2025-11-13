@@ -186,7 +186,8 @@ class LInstantNGP(LU.LVolume):
                     a_sigma= self.nerf(ch_points + a * offset, None, only_sigma=True)
                     b_sigma= self.nerf(ch_points + b * offset, None, only_sigma=True)
 
-                rtv = torch.abs(ch_sigma - a_sigma) + torch.abs(ch_sigma - b_sigma)
+                # Adding 1e-8 to avoid numerical instability of close to 0
+                rtv = torch.sqrt((ch_sigma - a_sigma) ** 2 + (ch_sigma - b_sigma) ** 2 + 1e-8)
                 rtv = rtv.sum(-1).sum(-1).mean()
                 loss += rtv * tv_loss_weight * self.hparams.ray_tv_loss_mult
         
